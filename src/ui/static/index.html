@@ -1,0 +1,2110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CLI Proxy Status Dashboard</title>
+    <!-- Element Plus CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.8.0/dist/index.css">
+    <!-- Custom styles -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app" v-cloak>
+        <div class="container">
+            <header>
+                <h1>CLI Proxy Status Dashboard</h1>
+                <div class="refresh-info">
+                    <span>{{ lastUpdate }}</span>
+                    <el-button type="primary" @click="refreshData" :loading="loading" size="small">
+                        Refresh
+                    </el-button>
+                </div>
+            </header>
+
+            <main>
+                <!-- Service status cards -->
+                <section class="services-section">
+                    <h2>Proxy Service Status</h2>
+                    <div class="services-grid">
+                        <div class="service-card">
+                            <h3>Claude Service</h3>
+                            <div class="status-indicator">
+                                <span :class="['status-dot', services.claude.running ? 'running' : 'stopped']"></span>
+                                <span class="status-text">{{ services.claude.running ? 'Running' : 'Stopped' }}</span>
+                            </div>
+                            <div class="service-info">
+                                <p><strong>PID:</strong> <span>{{ services.claude.pid || '-' }}</span></p>
+                                <p><strong>Port:</strong> 3210</p>
+                                <p><strong>Upstream Config:</strong> 
+                                    <el-select 
+                                        v-model="services.claude.config" 
+                                        placeholder="Select configuration..."
+                                        @change="switchConfig('claude', $event)"
+                                        size="small"
+                                        style="width: 150px;"
+                                        :disabled="isLoadbalanceWeightMode">
+                                        <el-option 
+                                            v-for="config in claudeConfigs" 
+                                            :key="config" 
+                                            :label="config" 
+                                            :value="config">
+                                        </el-option>
+                                    </el-select>
+                                </p>
+                                <p v-if="isLoadbalanceWeightMode" class="loadbalance-hint">
+                                    <i class="el-icon-warning-outline"></i>
+                                    <span>{{ loadbalanceDisabledNotice }}</span>
+                                </p>
+                            </div>
+                        </div>
+
+                        <div class="service-card">
+                            <h3>Codex Service</h3>
+                            <div class="status-indicator">
+                                <span :class="['status-dot', services.codex.running ? 'running' : 'stopped']"></span>
+                                <span class="status-text">{{ services.codex.running ? 'Running' : 'Stopped' }}</span>
+                            </div>
+                            <div class="service-info">
+                                <p><strong>PID:</strong> <span>{{ services.codex.pid || '-' }}</span></p>
+                                <p><strong>Port:</strong> 3211</p>
+                                <p><strong>Upstream Config:</strong> 
+                                    <el-select 
+                                        v-model="services.codex.config" 
+                                        placeholder="Select configuration..."
+                                        @change="switchConfig('codex', $event)"
+                                        size="small"
+                                        style="width: 150px;"
+                                        :disabled="isLoadbalanceWeightMode">
+                                        <el-option 
+                                            v-for="config in codexConfigs" 
+                                            :key="config" 
+                                            :label="config" 
+                                            :value="config">
+                                        </el-option>
+                                    </el-select>
+                                </p>
+                                <p v-if="isLoadbalanceWeightMode" class="loadbalance-hint">
+                                    <i class="el-icon-warning-outline"></i>
+                                    <span>{{ loadbalanceDisabledNotice }}</span>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Statistics -->
+                <section class="stats-section">
+                    <h2>System Metrics</h2>
+                    <div class="stats-grid">
+                        <div class="stat-card clickable" @click="viewAllLogs">
+                            <h4>Total Requests</h4>
+                            <div class="stat-value">{{ stats.requestCount || 0 }}</div>
+                            <div class="stat-hint">Click to view request logs</div>
+                        </div>
+                        <div class="stat-card clickable" @click="openConfigDrawer">
+                            <h4>Configuration Count</h4>
+                            <div class="stat-value">{{ stats.configCount || 0 }}</div>
+                            <div class="stat-hint">Click to edit configurations</div>
+                        </div>
+                        <div class="stat-card clickable" @click="openFilterDrawer">
+                            <h4>Request Filters</h4>
+                            <div class="stat-value">{{ stats.filterCount || 0 }}</div>
+                            <div class="stat-hint">Click to edit filters</div>
+                        </div>
+                        <div class="stat-card clickable usage-card" @click="openUsageDrawer">
+                            <h4>Token Usage</h4>
+                            <div class="stat-value">{{ usageSummary.formattedTotals.total || '0' }}</div>
+                            <div class="stat-hint">Click to view details</div>
+                        </div>
+                        <div class="stat-card clickable" @click="openModelSettings">
+                            <h4>Model Settings</h4>
+                            <div class="stat-value">Codex</div>
+                            <div class="stat-hint">Configure default reasoning effort and verbosity</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Model settings drawer -->
+                <el-drawer
+                    v-model="modelSettingsVisible"
+                    direction="rtl"
+                    class="mapping-drawer"
+                    :with-header="true"
+                    :size="drawerSizes.mapping"
+                    title="Model Settings (Codex)">
+                    <div class="mapping-drawer-content">
+                        <div class="mapping-section">
+                            <div class="mapping-header">
+                                <h4>Default Settings</h4>
+                                <div class="mapping-desc">Define default reasoning effort and verbosity for frequently used models.</div>
+                            </div>
+                            <div class="mapping-list">
+                                <div class="mapping-item">
+                                    <div class="mapping-form">
+                                        <div class="mapping-field-compact" style="flex-wrap: wrap; gap:12px 16px;">
+                                            <label style="width:90px">gpt-5</label>
+                                            <div>
+                                                <div class="mini-label">Reasoning Effort</div>
+                                                <el-select v-model="effortByModel['gpt-5']" size="small" style="width: 180px" :teleported="true">
+                                                    <el-option label="minimal" value="minimal"></el-option>
+                                                    <el-option label="low" value="low"></el-option>
+                                                    <el-option label="medium" value="medium"></el-option>
+                                                    <el-option label="high" value="high"></el-option>
+                                                </el-select>
+                                            </div>
+                                            <div>
+                                                <div class="mini-label">Response Detail</div>
+                                                <el-select v-model="verbosityByModel['gpt-5']" size="small" style="width: 160px" :teleported="true">
+                                                    <el-option label="low" value="low"></el-option>
+                                                    <el-option label="medium" value="medium"></el-option>
+                                                    <el-option label="high" value="high"></el-option>
+                                                </el-select>
+                                            </div>
+                                            <div>
+                                                <div class="mini-label">Reasoning Summary</div>
+                                                <el-select v-model="summaryByModel['gpt-5']" size="small" style="width: 160px" :teleported="true">
+                                                    <el-option label="off" value="off"></el-option>
+                                                    <el-option label="auto" value="auto"></el-option>
+                                                    <el-option label="detailed" value="detailed"></el-option>
+                                                </el-select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="mapping-item">
+                                    <div class="mapping-form">
+                                        <div class="mapping-field-compact" style="flex-wrap: wrap; gap:12px 16px;">
+                                            <label style="width:90px">gpt-5-codex</label>
+                                           <div>
+                                               <div class="mini-label">Reasoning Effort</div>
+                                                <el-select v-model="effortByModel['gpt-5-codex']" size="small" style="width: 180px" :teleported="true">
+                                                    <el-option label="low" value="low"></el-option>
+                                                    <el-option label="medium" value="medium"></el-option>
+                                                    <el-option label="high" value="high"></el-option>
+                                                </el-select>
+                                            </div>
+                                            <div>
+                                                <div class="mini-label">Response Detail</div>
+                                                <el-select v-model="verbosityByModel['gpt-5-codex']" size="small" style="width: 160px" :teleported="true">
+                                                    <el-option label="low" value="low"></el-option>
+                                                    <el-option label="medium" value="medium"></el-option>
+                                                    <el-option label="high" value="high"></el-option>
+                                                </el-select>
+                                            </div>
+                                            <div>
+                                                <div class="mini-label">Reasoning Summary</div>
+                                                <el-select v-model="summaryByModel['gpt-5-codex']" size="small" style="width: 160px" :teleported="true">
+                                                    <el-option label="off" value="off"></el-option>
+                                                    <el-option label="auto" value="auto"></el-option>
+                                                    <el-option label="detailed" value="detailed"></el-option>
+                                                </el-select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mapping-actions" style="justify-content: flex-end;">
+                            <el-button @click="modelSettingsVisible = false">Cancel</el-button>
+                            <el-button type="primary" @click="saveModelSettings">Save</el-button>
+                        </div>
+                    </div>
+                </el-drawer>
+
+                <!-- Model routing management -->
+                <section class="routing-section">
+                    <h2>Model Routing Management</h2>
+                    <div class="routing-grid">
+                        <div class="routing-card" 
+                             :class="{ active: routingMode === 'default' }"
+                             @click="selectRoutingMode('default')">
+                            <div class="routing-card-header">
+                                <i class="el-icon-right"></i>
+                                <h4>Default Routing</h4>
+                            </div>
+                            <div class="routing-card-description">
+                                Forward requests to the upstream exactly as-is without changing model parameters.
+                            </div>
+                            <div class="routing-card-status" v-if="routingMode === 'default'">
+                                <el-tag type="success" size="small">Active</el-tag>
+                            </div>
+                        </div>
+                        
+                        <div class="routing-card" 
+                             :class="{ active: routingMode === 'model-mapping' }"
+                             @click="selectRoutingMode('model-mapping')">
+                            <div class="routing-card-header">
+                                <i class="el-icon-s-operation"></i>
+                                <h4>Model|Config → Model Mapping</h4>
+                            </div>
+                            <div class="routing-card-description">
+                                Map incoming model|config pairs to other models, e.g. sonnet4 → opus4 or siteA → opus4.
+                            </div>
+                            <div class="routing-card-status" v-if="routingMode === 'model-mapping'">
+                                <el-tag type="success" size="small">Active</el-tag>
+                            </div>
+                            <div class="routing-card-actions" v-if="routingMode === 'model-mapping'">
+                                <el-button type="text" size="small" @click.stop="openModelMappingDrawer">
+                                    <i class="el-icon-setting"></i> Configure Mappings
+                                </el-button>
+                            </div>
+                        </div>
+                        
+                        <div class="routing-card" 
+                             :class="{ active: routingMode === 'config-mapping' }"
+                             @click="selectRoutingMode('config-mapping')">
+                            <div class="routing-card-header">
+                                <i class="el-icon-s-tools"></i>
+                                <h4>Model → Config Mapping</h4>
+                            </div>
+                            <div class="routing-card-description">
+                                Choose upstream configurations based on the requested model, e.g. sonnet4 uses config A.
+                            </div>
+                            <div class="routing-card-status" v-if="routingMode === 'config-mapping'">
+                                <el-tag type="success" size="small">Active</el-tag>
+                            </div>
+                            <div class="routing-card-actions" v-if="routingMode === 'config-mapping'">
+                                <el-button type="text" size="small" @click.stop="openConfigMappingDrawer">
+                                    <i class="el-icon-setting"></i> Configure Mappings
+                                </el-button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Load balancing -->
+                <section class="loadbalance-section">
+                    <h2>Load Balancing</h2>
+                    <div class="routing-grid">
+                        <div class="routing-card"
+                             :class="{ active: loadbalanceConfig.mode === 'active-first' }"
+                             @click="selectLoadbalanceMode('active-first')">
+                            <div class="routing-card-header">
+                                <i class="el-icon-switch-button"></i>
+                                <h4>Active-First</h4>
+                            </div>
+                            <div class="routing-card-description">
+                                Always forward requests with the currently active configuration.
+                            </div>
+                            <div class="routing-card-status" v-if="loadbalanceConfig.mode === 'active-first'">
+                                <el-tag type="success" size="small">Active</el-tag>
+                            </div>
+                        </div>
+
+                        <div class="routing-card"
+                             :class="{ active: loadbalanceConfig.mode === 'weight-based' }"
+                             @click="selectLoadbalanceMode('weight-based')">
+                            <div class="routing-card-header">
+                                <i class="el-icon-data-analysis"></i>
+                                <h4>Weight-Based</h4>
+                            </div>
+                            <div class="routing-card-description">
+                                Order upstream targets by weight; automatically rotate after repeated failures.
+                            </div>
+                            <div class="routing-card-status" v-if="loadbalanceConfig.mode === 'weight-based'">
+                                <el-tag type="success" size="small">Active</el-tag>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="loadbalance-details" v-if="isLoadbalanceWeightMode" v-loading="loadbalanceLoading">
+                        <div class="lb-service-block" v-for="service in ['claude', 'codex']" :key="service">
+                            <div class="lb-block-header">
+                                <h4>{{ service === 'claude' ? 'Claude' : 'Codex' }} Forwarding Order</h4>
+                                <el-button type="text" size="small"
+                                           :loading="resettingFailures[service]"
+                                           @click="resetLoadbalanceFailures(service)">
+                                    <i class="el-icon-refresh"></i> Reset Failure Count
+                                </el-button>
+                            </div>
+                            <el-empty description="No upstream targets configured" v-if="weightedTargets[service].length === 0"></el-empty>
+                            <ul class="lb-weight-list" v-else>
+                                <li v-for="(item, index) in weightedTargets[service]"
+                                    :key="item.name"
+                                    :class="{ 'lb-failed': item.failures >= item.threshold }">
+                                    <span class="lb-rank">{{ index + 1 }}</span>
+                                    <div class="lb-info">
+                                        <div class="lb-name">
+                                            {{ item.name }}
+                                            <el-tag v-if="item.isActive" size="small" type="info">Currently Active</el-tag>
+                                            <el-tag v-if="item.excluded" size="small" type="danger" effect="plain">Temporarily Skipped</el-tag>
+                                        </div>
+                                        <div class="lb-meta">
+                                            Weight {{ item.weight }} · Failures {{ item.failures }} / {{ item.threshold }}
+                                        </div>
+                                        <div class="lb-actions">
+                                            <el-button
+                                                type="primary"
+                                                size="small"
+                                                plain
+                                                @click.stop="pinWeightedTarget(service, item.name)"
+                                                :loading="pinningState[service].loading && pinningState[service].target === item.name"
+                                                :disabled="pinningState[service].loading && pinningState[service].target !== item.name">
+                                                Pin to Top
+                                            </el-button>
+                                        </div>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </section>
+
+
+            </main>
+        </div>
+
+        <!-- Configuration editor drawer -->
+        <el-drawer 
+            v-model="configDrawerVisible" 
+            title="Configuration Editor" 
+            :size="drawerSizes.config"
+            class="config-drawer">
+            
+            <div class="config-tabs">
+                <el-button 
+                    :type="activeConfigTab === 'claude' ? 'primary' : ''"
+                    @click="activeConfigTab = 'claude'"
+                    size="small">
+                    Claude Configuration
+                </el-button>
+                <el-button 
+                    :type="activeConfigTab === 'codex' ? 'primary' : ''"
+                    @click="activeConfigTab = 'codex'"
+                    size="small">
+                    Codex Configuration
+                </el-button>
+            </div>
+            
+            <div class="config-content">
+                <div v-show="activeConfigTab === 'claude'" class="tab-panel">
+                    <div class="config-editor">
+                        <!-- Mode switch area -->
+                        <div class="config-mode-tabs">
+                            <el-button
+                                :type="configEditMode === 'merged' ? 'primary' : ''"
+                                @click="switchToMergedMode"
+                                size="small">
+                                Merged Mode
+                            </el-button>
+                            <el-button
+                                :type="configEditMode === 'interactive' ? 'primary' : ''"
+                                @click="configEditMode = 'interactive'"
+                                size="small">
+                                <i class="el-icon-data-analysis mode-icon"></i>Interactive Mode
+                            </el-button>
+                            <el-button
+                                :type="configEditMode === 'json' ? 'primary' : ''"
+                                @click="configEditMode = 'json'"
+                                size="small">
+                                JSON Mode
+                            </el-button>
+                        </div>
+
+                        <!-- Merged mode content -->
+                        <div v-show="configEditMode === 'merged'" class="merged-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="success"
+                                        size="small"
+                                        @click="openMergedDialog('claude')">
+                                        Add Site
+                                    </el-button>
+                                    <el-button
+                                        type="primary"
+                                        size="small"
+                                        :loading="configSaving"
+                                        @click="saveMergedConfig('claude')">
+                                        Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+
+                            <!-- Group list -->
+                            <div class="merged-groups-container">
+                                <div
+                                    v-for="(group, groupIndex) in mergedConfigs.claude"
+                                    :key="group.baseUrl"
+                                    :class="['merged-group-card', { 'merged-group-active': isMergedGroupActive(group) }]">
+
+                                    <!-- Group header -->
+                                    <div class="merged-group-header">
+                                        <div class="group-field">
+                                            <label>Upstream URL:</label>
+                                            <el-input
+                                                v-model="group.baseUrl"
+                                                placeholder="https://api.example.com"
+                                                @blur="applyMergedGroupUpdate('claude', groupIndex)"
+                                                style="width: 350px;">
+                                            </el-input>
+                                        </div>
+
+                                        <div class="group-field">
+                                            <label>Weight:</label>
+                                            <el-input-number
+                                                v-model="group.weight"
+                                                :min="0"
+                                                :step="1"
+                                                @change="applyMergedGroupUpdate('claude', groupIndex)"
+                                                style="width: 120px;">
+                                            </el-input-number>
+                                        </div>
+
+                                        <div class="group-field">
+                                            <label>Authentication Method:</label>
+                                            <el-radio-group
+                                                v-model="group.authType"
+                                                @change="applyMergedGroupUpdate('claude', groupIndex)"
+                                                size="small">
+                                                <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                                <el-radio-button label="api_key">API Key</el-radio-button>
+                                            </el-radio-group>
+                                        </div>
+                                    </div>
+
+                                    <!-- Credential summary -->
+                                    <div class="merged-group-summary">
+                                        <el-divider>
+                                            Credential Entries · {{ group.entries.length }} total
+                                        </el-divider>
+                                    </div>
+
+                                    <!-- Group footer actions -->
+                                    <div class="merged-group-footer">
+                                        <el-button
+                                            type="primary"
+                                            size="small"
+                                            plain
+                                            @click="editMergedGroup('claude', groupIndex)">
+                                            Edit
+                                        </el-button>
+                                        <el-button
+                                            type="danger"
+                                            size="small"
+                                            plain
+                                            @click="deleteMergedGroup('claude', groupIndex)">
+                                            Delete Site Group
+                                        </el-button>
+                                    </div>
+                                </div>
+
+                                <!-- Empty state -->
+                                <div v-if="mergedConfigs.claude.length === 0" class="merged-empty-state">
+                                    <el-empty description="No grouped configurations yet. Click Add Site to begin."></el-empty>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Interactive mode content -->
+                        <div v-show="configEditMode === 'interactive'" class="interactive-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="success"
+                                        size="small"
+                                        @click="startAddingSite('claude')">Add Site
+                                    </el-button>
+                                    <el-button
+                                        type="primary"
+                                        size="small"
+                                        :loading="configSaving"
+                                        @click="saveInteractiveConfig('claude')">Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+
+                            <div class="config-sites-container">
+                                <!-- New site editor -->
+                                <div v-if="editingNewSite.claude" class="config-site-card new-site-editor">
+                                    <div class="config-field">
+                                        <label class="field-label">Site Name:</label>
+                                        <el-input
+                                            v-model="newSiteData.claude.name"
+                                            placeholder="Example: OpenAI-GPT4"
+                                            class="new-site-name-input"
+                                            @keyup.enter="confirmAddSite('claude')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Upstream URL:</label>
+                                        <el-input
+                                            v-model="newSiteData.claude.baseUrl"
+                                            placeholder="Example: https://api.openai.com">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Weight:</label>
+                                        <el-input-number
+                                            v-model.number="newSiteData.claude.weight"
+                                            :min="0"
+                                            :step="1">
+                                        </el-input-number>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Authentication Method:</label>
+                                        <el-radio-group v-model="newSiteData.claude.authType">
+                                            <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                            <el-radio-button label="api_key">API Key</el-radio-button>
+                                        </el-radio-group>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Credential:</label>
+                                        <el-input
+                                            v-model="newSiteData.claude.authValue"
+                                            :placeholder="newSiteData.claude.authType === 'auth_token' ? 'Auth Token' : 'API Key'"
+                                            type="password"
+                                            show-password>
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Active Status:</label>
+                                        <div class="field-control">
+                                            <el-switch v-model="newSiteData.claude.active"></el-switch>
+                                            <div class="config-actions-inline">
+                                                <el-button @click="cancelAddSite('claude')" size="small">Cancel</el-button>
+                                                <el-button type="primary" @click="confirmAddSite('claude')" size="small">Confirm</el-button>
+                                                <el-button type="info" @click="testNewSiteConnection('claude')" size="small" plain>Test</el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Existing site list -->
+                                <div v-for="(site, index) in friendlyConfigs.claude" :key="index"
+                                     :class="['config-site-card', { 'site-active': site.active }]">
+                                    <div class="config-field">
+                                        <label class="field-label">Site Name:</label>
+                                        <el-input
+                                            v-model="site.name"
+                                            placeholder="Site name"
+                                            @input="syncFormToJson('claude')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Upstream URL:</label>
+                                        <el-input
+                                            v-model="site.baseUrl"
+                                            placeholder="Target base URL"
+                                            @input="syncFormToJson('claude')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Weight:</label>
+                                        <el-input-number
+                                            v-model.number="site.weight"
+                                            :min="0"
+                                            :step="1"
+                                            @change="syncFormToJson('claude')"
+                                            @input="syncFormToJson('claude')">
+                                        </el-input-number>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Authentication Method:</label>
+                                        <el-radio-group
+                                            v-model="site.authType"
+                                            @change="syncFormToJson('claude')">
+                                            <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                            <el-radio-button label="api_key">API Key</el-radio-button>
+                                        </el-radio-group>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Credential:</label>
+                                        <el-input
+                                            v-model="site.authValue"
+                                            :placeholder="site.authType === 'auth_token' ? 'Auth Token' : 'API Key'"
+                                            type="password"
+                                            show-password
+                                            @input="syncFormToJson('claude')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Active Status:</label>
+                                        <div class="field-control">
+                                            <el-switch
+                                                v-model="site.active"
+                                                @change="handleActiveChange('claude', index, $event)">
+                                            </el-switch>
+                                            <div class="config-actions-inline">
+                                                <el-button
+                                                    @click="removeConfigSite('claude', index)"
+                                                    type="danger"
+                                                    size="small">
+                                                    Delete
+                                                </el-button>
+                                                <el-button
+                                                    @click="testSiteConnection('claude', index)"
+                                                    type="info"
+                                                    size="small"
+                                                    plain>
+                                                    Test
+                                                </el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-form-help" v-if="friendlyConfigs.claude.length === 0 && !editingNewSite.claude">
+                                    <p><em>No site configuration yet. Click "Add Site" to get started.</em></p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- JSON mode content -->
+                        <div v-show="configEditMode === 'json'" class="json-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="primary"
+                                        @click="saveConfig"
+                                        :loading="configSaving"
+                                        size="small">
+                                        Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+                            <label>claude.json Configuration:</label>
+                            <el-input
+                                v-model="configContents.claude"
+                                type="textarea"
+                                :rows="20"
+                                placeholder="Loading..."
+                                style="font-family: monospace;">
+                            </el-input>
+                            <div class="config-help">
+                                <p><strong>Sample structure:</strong></p>
+                                <code>{
+  "Custom site name": {
+    "base_url": "Target base URL",
+    "auth_token": "Auth token value",
+    "api_key": "Use this for providers that expect x-api-key",
+    "active": false
+  }
+}</code>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div v-show="activeConfigTab === 'codex'" class="tab-panel">
+                    <div class="config-editor">
+                        <!-- Mode switch area -->
+                        <div class="config-mode-tabs">
+                            <el-button
+                                :type="configEditMode === 'merged' ? 'primary' : ''"
+                                @click="switchToMergedMode"
+                                size="small">
+                                Merged Mode
+                            </el-button>
+                            <el-button
+                                :type="configEditMode === 'interactive' ? 'primary' : ''"
+                                @click="configEditMode = 'interactive'"
+                                size="small">
+                                <i class="el-icon-data-analysis mode-icon"></i>Interactive Mode
+                            </el-button>
+                            <el-button
+                                :type="configEditMode === 'json' ? 'primary' : ''"
+                                @click="configEditMode = 'json'"
+                                size="small">
+                                JSON Mode
+                            </el-button>
+                        </div>
+
+                        <!-- Merged mode content -->
+                        <div v-show="configEditMode === 'merged'" class="merged-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="success"
+                                        size="small"
+                                        @click="openMergedDialog('codex')">
+                                        Add Site
+                                    </el-button>
+                                    <el-button
+                                        type="primary"
+                                        size="small"
+                                        :loading="configSaving"
+                                        @click="saveMergedConfig('codex')">
+                                        Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+
+                            <!-- Group list -->
+                            <div class="merged-groups-container">
+                                <div
+                                    v-for="(group, groupIndex) in mergedConfigs.codex"
+                                    :key="group.baseUrl"
+                                    :class="['merged-group-card', { 'merged-group-active': isMergedGroupActive(group) }]">
+
+                                    <!-- Group header -->
+                                    <div class="merged-group-header">
+                                        <div class="group-field">
+                                            <label>Upstream URL:</label>
+                                            <el-input
+                                                v-model="group.baseUrl"
+                                                placeholder="https://api.example.com"
+                                                @blur="applyMergedGroupUpdate('codex', groupIndex)"
+                                                style="width: 350px;">
+                                            </el-input>
+                                        </div>
+
+                                        <div class="group-field">
+                                            <label>Weight:</label>
+                                            <el-input-number
+                                                v-model="group.weight"
+                                                :min="0"
+                                                :step="1"
+                                                @change="applyMergedGroupUpdate('codex', groupIndex)"
+                                                style="width: 120px;">
+                                            </el-input-number>
+                                        </div>
+
+                                        <div class="group-field">
+                                            <label>Authentication Method:</label>
+                                            <el-radio-group
+                                                v-model="group.authType"
+                                                @change="applyMergedGroupUpdate('codex', groupIndex)"
+                                                size="small">
+                                                <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                                <el-radio-button label="api_key">API Key</el-radio-button>
+                                            </el-radio-group>
+                                        </div>
+                                    </div>
+
+                                    <!-- Credential summary -->
+                                    <div class="merged-group-summary">
+                                        <el-divider>
+                                            Credential Entries · {{ group.entries.length }} total
+                                        </el-divider>
+                                    </div>
+
+                                    <!-- Group footer actions -->
+                                    <div class="merged-group-footer">
+                                        <el-button
+                                            type="primary"
+                                            size="small"
+                                            plain
+                                            @click="editMergedGroup('codex', groupIndex)">
+                                            Edit
+                                        </el-button>
+                                        <el-button
+                                            type="danger"
+                                            size="small"
+                                            plain
+                                            @click="deleteMergedGroup('codex', groupIndex)">
+                                            Delete Site Group
+                                        </el-button>
+                                    </div>
+                                </div>
+
+                                <!-- Empty state -->
+                                <div v-if="mergedConfigs.codex.length === 0" class="merged-empty-state">
+                                    <el-empty description="No grouped configurations yet. Click Add Site to begin."></el-empty>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Interactive mode content -->
+                        <div v-show="configEditMode === 'interactive'" class="interactive-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="success"
+                                        size="small"
+                                        @click="startAddingSite('codex')">Add Site
+                                    </el-button>
+                                    <el-button
+                                        type="primary"
+                                        size="small"
+                                        :loading="configSaving"
+                                        @click="saveInteractiveConfig('codex')">Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+
+                            <div class="config-sites-container">
+                                <!-- New site editor -->
+                                <div v-if="editingNewSite.codex" class="config-site-card new-site-editor">
+                                    <div class="config-field">
+                                        <label class="field-label">Site Name:</label>
+                                        <el-input
+                                            v-model="newSiteData.codex.name"
+                                            placeholder="Example: OpenAI-GPT4"
+                                            class="new-site-name-input"
+                                            @keyup.enter="confirmAddSite('codex')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Upstream URL:</label>
+                                        <el-input
+                                            v-model="newSiteData.codex.baseUrl"
+                                            placeholder="Example: https://api.openai.com">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Weight:</label>
+                                        <el-input-number
+                                            v-model.number="newSiteData.codex.weight"
+                                            :min="0"
+                                            :step="1">
+                                        </el-input-number>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Authentication Method:</label>
+                                        <el-radio-group v-model="newSiteData.codex.authType">
+                                            <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                            <el-radio-button label="api_key">API Key</el-radio-button>
+                                        </el-radio-group>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Credential:</label>
+                                        <el-input
+                                            v-model="newSiteData.codex.authValue"
+                                            :placeholder="newSiteData.codex.authType === 'auth_token' ? 'Auth Token' : 'API Key'"
+                                            type="password"
+                                            show-password>
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Active Status:</label>
+                                        <div class="field-control">
+                                            <el-switch v-model="newSiteData.codex.active"></el-switch>
+                                            <div class="config-actions-inline">
+                                                <el-button @click="cancelAddSite('codex')" size="small">Cancel</el-button>
+                                                <el-button type="primary" @click="confirmAddSite('codex')" size="small">Confirm</el-button>
+                                                <el-button type="info" @click="testNewSiteConnection('codex')" size="small" plain>Test</el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Existing site list -->
+                                <div v-for="(site, index) in friendlyConfigs.codex" :key="index"
+                                     :class="['config-site-card', { 'site-active': site.active }]">
+                                    <div class="config-field">
+                                        <label class="field-label">Site Name:</label>
+                                        <el-input
+                                            v-model="site.name"
+                                            placeholder="Site name"
+                                            @input="syncFormToJson('codex')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Upstream URL:</label>
+                                        <el-input
+                                            v-model="site.baseUrl"
+                                            placeholder="Target base URL"
+                                            @input="syncFormToJson('codex')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Weight:</label>
+                                        <el-input-number
+                                            v-model.number="site.weight"
+                                            :min="0"
+                                            :step="1"
+                                            @change="syncFormToJson('codex')"
+                                            @input="syncFormToJson('codex')">
+                                        </el-input-number>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Authentication Method:</label>
+                                        <el-radio-group
+                                            v-model="site.authType"
+                                            @change="syncFormToJson('codex')">
+                                            <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                            <el-radio-button label="api_key">API Key</el-radio-button>
+                                        </el-radio-group>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Credential:</label>
+                                        <el-input
+                                            v-model="site.authValue"
+                                            :placeholder="site.authType === 'auth_token' ? 'Auth Token' : 'API Key'"
+                                            type="password"
+                                            show-password
+                                            @input="syncFormToJson('codex')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Active Status:</label>
+                                        <div class="field-control">
+                                            <el-switch
+                                                v-model="site.active"
+                                                @change="handleActiveChange('codex', index, $event)">
+                                            </el-switch>
+                                            <div class="config-actions-inline">
+                                                <el-button
+                                                    @click="removeConfigSite('codex', index)"
+                                                    type="danger"
+                                                    size="small">
+                                                    Delete
+                                                </el-button>
+                                                <el-button
+                                                    @click="testSiteConnection('codex', index)"
+                                                    type="info"
+                                                    size="small"
+                                                    plain>
+                                                    Test
+                                                </el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-form-help" v-if="friendlyConfigs.codex.length === 0 && !editingNewSite.codex">
+                                    <p><em>No site configuration yet. Click "Add Site" to get started.</em></p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- JSON mode content -->
+                        <div v-show="configEditMode === 'json'" class="json-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="primary"
+                                        @click="saveConfig"
+                                        :loading="configSaving"
+                                        size="small">
+                                        Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+                            <label>codex.json Configuration:</label>
+                            <el-input
+                                v-model="configContents.codex"
+                                type="textarea"
+                                :rows="20"
+                                placeholder="Loading..."
+                                style="font-family: monospace;">
+                            </el-input>
+                            <div class="config-help">
+                                <p><strong>Sample structure:</strong></p>
+                                <code>{
+  "Custom site name": {
+    "base_url": "Target base URL",
+    "auth_token": "Auth token value",
+    "api_key": "Use this for providers that expect x-api-key",
+    "active": false
+  }
+}</code>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </el-drawer>
+
+        <!-- Filter editor drawer -->
+        <el-drawer 
+            v-model="filterDrawerVisible" 
+            title="Request Filter Editor" 
+            :size="drawerSizes.filter"
+            class="filter-drawer">
+            
+            <div class="config-content">
+                <div class="tab-panel active">
+                    <div class="filter-editor">
+                        <label>Filter Rule Configuration:</label>
+                        <div class="filter-rules-container">
+                            <div v-for="(rule, index) in filterRules" :key="index" class="filter-rule-row">
+                                <el-input
+                                    v-model="rule.source"
+                                    placeholder="Text to match"
+                                    size="small"
+                                    style="width: 180px">
+                                </el-input>
+                                <el-select 
+                                    v-model="rule.op" 
+                                    size="small"
+                                    style="width: 100px; margin: 0 10px">
+                                    <el-option label="Replace" value="replace"></el-option>
+                                    <el-option label="Remove" value="remove"></el-option>
+                                </el-select>
+                                <el-input
+                                    v-model="rule.target"
+                                    placeholder="Replacement text"
+                                    :disabled="rule.op === 'remove'"
+                                    size="small"
+                                    style="width: 180px">
+                                </el-input>
+                                <el-button 
+                                    @click="removeFilterRule(index)" 
+                                    type="danger" 
+                                    icon="el-icon-delete" 
+                                    circle
+                                    size="small">
+                                </el-button>
+                            </div>
+                            <el-button 
+                                @click="addFilterRule" 
+                                type="success" 
+                                size="small"
+                                icon="el-icon-plus"
+                                style="margin-top: 10px">
+                                Add Rule
+                            </el-button>
+                        </div>
+                        <div class="filter-help">
+                            <p><strong>Usage tips:</strong></p>
+                            <p>• One rule per row, executed in order</p>
+                            <p>• For "Replace", the source text is replaced with the target</p>
+                            <p>• For "Remove", matching source text is deleted</p>
+                            <p>• Regular expressions are supported</p>
+                        </div>
+                        <div class="editor-actions">
+                            <el-button 
+                                type="primary" 
+                                @click="saveFilter" 
+                                :loading="filterSaving"
+                                size="small">
+                                Save Rules
+                            </el-button>
+                            <el-button 
+                                @click="loadFilter" 
+                                size="small">
+                                Reload
+                            </el-button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </el-drawer>
+
+        <!-- Log detail drawer -->
+        <el-drawer
+            v-model="logDetailVisible"
+            title="Request Log Detail"
+            :size="drawerSizes.logDetail"
+            class="log-detail-drawer">
+            
+            <div v-if="selectedLog" class="log-detail-content">
+                <!-- Tab navigation -->
+                <el-tabs v-model="activeLogTab" class="log-detail-tabs">
+                    <!-- Tab 1: Basic -->
+                    <el-tab-pane label="Basic" name="basic">
+                        <div class="detail-section">
+                            <div class="detail-basic-list">
+                                <div class="detail-row">
+                                    <span class="label">Time:</span>
+                                    <span class="value">{{ selectedLog.timestamp || '-' }}</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="label">Service:</span>
+                                    <span class="value">{{ selectedLog.service || '-' }}</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="label">Channel:</span>
+                                    <span class="value">{{ formatChannelName(selectedLog.channel) }}</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="label">Method:</span>
+                                    <span class="value">{{ selectedLog.method || '-' }}</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="label">Status Code:</span>
+                                    <span class="value">
+                                        <el-tag :type="getStatusTagType(selectedLog.status_code)">
+                                            {{ selectedLog.status_code || '-' }}
+                                        </el-tag>
+                                    </span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="label">Latency:</span>
+                                    <span class="value">{{ selectedLog.duration_ms ? `${selectedLog.duration_ms}ms` : '-' }}</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="label">Request Path:</span>
+                                    <span class="value">
+                                        <code class="path-code">{{ selectedLog.path || '-' }}</code>
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="detail-section usage-section">
+                            <h4>Usage Metrics</h4>
+                            <div class="usage-grid">
+                                <div class="usage-item" v-for="(label, key) in usageMetricLabels" :key="key">
+                                    <span class="usage-label">{{ label }}:</span>
+                                    <span class="usage-value">{{ formatUsageValue(selectedLog.usage?.metrics?.[key] || 0) }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </el-tab-pane>
+
+                    <!-- Tab 2: Request -->
+                    <el-tab-pane label="Request" name="request">
+                        <div class="detail-section">
+                            <!-- Toggle filtered/unfiltered -->
+                            <div class="request-transform-switch" style="margin-bottom: 16px;">
+                                <span style="margin-right: 8px; color: #606266;">Show filtered payload:</span>
+                                <el-switch v-model="showTransformedData"></el-switch>
+                            </div>
+
+                            <!-- Sub-tabs: headers and body -->
+                            <el-tabs v-model="activeRequestSubTab" type="card">
+                                <!-- Sub-tab 2.1: request headers -->
+                                <el-tab-pane label="Headers" name="headers">
+                                    <div class="headers-content-flat">
+                                        <div v-if="showTransformedData">
+                                            <!-- Filtered headers -->
+                                            <div v-if="!selectedLog.target_headers || Object.keys(selectedLog.target_headers).length === 0" class="no-headers">
+                                                No header data
+                                            </div>
+                                            <div v-else class="headers-list-flat">
+                                                <div
+                                                    v-for="key in getSortedHeaderKeys(selectedLog.target_headers)"
+                                                    :key="key"
+                                                    class="header-item-flat">
+                                                    <span class="header-key-flat">{{ key }}:</span>
+                                                    <span class="header-value-flat">{{ selectedLog.target_headers[key] }}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div v-else>
+                                            <!-- Original headers -->
+                                            <div v-if="!selectedLog.original_headers || Object.keys(selectedLog.original_headers).length === 0" class="no-headers">
+                                                No header data
+                                            </div>
+                                            <div v-else class="headers-list-flat">
+                                                <div
+                                                    v-for="key in getSortedHeaderKeys(selectedLog.original_headers)"
+                                                    :key="key"
+                                                    class="header-item-flat">
+                                                    <span class="header-key-flat">{{ key }}:</span>
+                                                    <span class="header-value-flat">{{ selectedLog.original_headers[key] }}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </el-tab-pane>
+
+                                <!-- Sub-tab 2.2: request body -->
+                                <el-tab-pane label="Body" name="body">
+                                    <div v-if="showTransformedData">
+                                        <!-- Filtered body -->
+                                        <div v-if="!selectedLog.filtered_body" class="no-body">
+                                            No body content
+                                        </div>
+                                        <div v-else class="request-body-fullscreen-container">
+                                            <div class="body-actions">
+                                                <el-button
+                                                    size="small"
+                                                    @click="copyToClipboard(decodedRequestBody)">
+                                                    Copy Content
+                                                </el-button>
+                                                <el-button
+                                                    size="small"
+                                                    @click="formatFilteredRequestBody">
+                                                    Format JSON
+                                                </el-button>
+                                            </div>
+                                            <el-input
+                                                v-model="decodedRequestBody"
+                                                type="textarea"
+                                                readonly
+                                                class="request-body-textarea-fullscreen">
+                                            </el-input>
+                                        </div>
+                                    </div>
+                                    <div v-else>
+                                        <!-- Original body -->
+                                        <div v-if="!selectedLog.original_body" class="no-body">
+                                            No body content
+                                        </div>
+                                        <div v-else class="request-body-fullscreen-container">
+                                            <div class="body-actions">
+                                                <el-button
+                                                    size="small"
+                                                    @click="copyToClipboard(decodedOriginalRequestBody)">
+                                                    Copy Content
+                                                </el-button>
+                                                <el-button
+                                                    size="small"
+                                                    @click="formatOriginalRequestBody">
+                                                    Format JSON
+                                                </el-button>
+                                            </div>
+                                            <el-input
+                                                v-model="decodedOriginalRequestBody"
+                                                type="textarea"
+                                                readonly
+                                                class="request-body-textarea-fullscreen">
+                                            </el-input>
+                                        </div>
+                                    </div>
+                                </el-tab-pane>
+                            </el-tabs>
+                        </div>
+                    </el-tab-pane>
+
+                    <!-- Tab 3: Response -->
+                    <el-tab-pane label="Response" name="response">
+                        <div class="detail-section">
+                            <!-- Sub-tabs: headers and body -->
+                            <el-tabs v-model="activeResponseSubTab" type="card">
+                                <!-- Sub-tab 3.1: response headers -->
+                                <el-tab-pane label="Headers" name="headers">
+                                    <div class="headers-content-flat">
+                                        <div v-if="!selectedLog.response_headers || Object.keys(selectedLog.response_headers).length === 0" class="no-headers">
+                                            No header data
+                                        </div>
+                                        <div v-else class="headers-list-flat">
+                                            <div
+                                                v-for="key in getSortedHeaderKeys(selectedLog.response_headers)"
+                                                :key="key"
+                                                class="header-item-flat">
+                                                <span class="header-key-flat">{{ key }}:</span>
+                                                <span class="header-value-flat">{{ selectedLog.response_headers[key] }}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </el-tab-pane>
+
+                                <!-- Sub-tab 3.2: response body -->
+                                <el-tab-pane label="Body" name="body">
+                                    <div v-if="!selectedLog.response_content" class="no-body">
+                                        No response content
+                                    </div>
+                                    <div v-else class="request-body-fullscreen-container">
+                                        <div class="body-actions">
+                                            <el-button
+                                                size="small"
+                                                @click="copyToClipboard(decodedResponseContent)">
+                                                Copy Content
+                                            </el-button>
+                                            <el-button
+                                                v-if="canParseSelectedLog"
+                                                size="small"
+                                                :type="isResponseContentParsed ? 'default' : 'primary'"
+                                                :disabled="!responseOriginalContent"
+                                                @click="toggleParsedResponse">
+                                                {{ isResponseContentParsed ? 'Restore Response' : 'Parse Response' }}
+                                            </el-button>
+                                        </div>
+                                        <el-input
+                                            v-model="decodedResponseContent"
+                                            type="textarea"
+                                            readonly
+                                            class="request-body-textarea-fullscreen">
+                                        </el-input>
+                                    </div>
+                                </el-tab-pane>
+                            </el-tabs>
+                        </div>
+                    </el-tab-pane>
+                </el-tabs>
+            </div>
+        </el-drawer>
+
+        <!-- All logs drawer -->
+        <el-drawer 
+            v-model="allLogsVisible" 
+            title="Request History" 
+            :size="drawerSizes.allLogs"
+            class="all-logs-drawer">
+            
+            <div class="all-logs-content" v-loading="allLogsLoading">
+                <!-- Realtime request module -->
+                <section class="realtime-section">
+                    <div class="realtime-header">
+                        <h3>Realtime Requests</h3>
+                        <div class="realtime-status-actions">
+                            <div class="connection-status">
+                                <el-tag v-if="connectionStatus.claude" type="success" size="small">Claude Connected</el-tag>
+                                <el-tag v-else type="danger" size="small">Claude Disconnected</el-tag>
+                                <el-tag v-if="connectionStatus.codex" type="success" size="small">Codex Connected</el-tag>
+                                <el-tag v-else type="danger" size="small">Codex Disconnected</el-tag>
+                            </div>
+                            <el-button 
+                                v-if="!connectionStatus.claude && !connectionStatus.codex"
+                                type="primary" 
+                                size="small" 
+                                @click="reconnectRealtime">
+                                Connect
+                            </el-button>
+                            <el-button 
+                                v-else
+                                type="danger" 
+                                size="small" 
+                                @click="disconnectRealtime">
+                                Disconnect
+                            </el-button>
+                        </div>
+                    </div>
+                    <div class="realtime-requests-container">
+                        <div v-if="realtimeRequests.length === 0" class="no-realtime-requests">
+                            <span>No realtime requests yet</span>
+                        </div>
+                        <div v-else class="realtime-container">
+                            <div class="realtime-table-header">
+                                <span>Service</span>
+                                <span>Path</span>
+                                <span>Status</span>
+                                <span>Latency</span>
+                                <span>Actions</span>
+                            </div>
+                            <div class="realtime-entries">
+                                <div 
+                                    v-for="request in realtimeRequests" 
+                                    :key="request.request_id"
+                                    class="realtime-entry"
+                                    @click="showRealtimeDetail(request)">
+                                    <span>{{ request.service }}{{ request.channel ? ` [${request.channel}]` : '' }}</span>
+                                    <span :title="request.path">{{ request.path }}</span>
+                                    <span>
+                                        <el-tag :type="getStatusDisplay(request.status).type" size="small">
+                                            {{ getStatusDisplay(request.status).text }}
+                                        </el-tag>
+                                    </span>
+                                    <span>{{ request.displayDuration }}ms</span>
+                                    <span>
+                                        <el-button 
+                                            type="primary" 
+                                            size="small" 
+                                            link
+                                            @click.stop="showRealtimeDetail(request)">
+                                            Details
+                                        </el-button>
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+                <div class="history-requests-section">
+                    <h3>Historic Requests</h3>
+                    <div class="all-logs-stats">
+                        <span>  Total {{ allLogs.length }} logs, keeping the most recent:
+                            <el-select
+                                v-model="systemConfig.logLimit"
+                                @change="handleLogLimitChange"
+                                size="small"
+                                style="width: 70px; margin: 0 4px;">
+                                <el-option :value="10" label="10"></el-option>
+                                <el-option :value="30" label="30"></el-option>
+                                <el-option :value="50" label="50"></el-option>
+                                <el-option :value="100" label="100"></el-option>
+                            </el-select>
+                            entries
+                        </span>
+                        <div class="stats-actions">
+                            <el-button
+                                type="primary"
+                                size="small"
+                                @click="refreshAllLogs"
+                                :loading="allLogsLoading">
+                                Refresh
+                            </el-button>
+                            <el-button
+                                type="danger"
+                                size="small"
+                                @click="clearAllLogs">
+                                Clear Logs
+                            </el-button>
+                        </div>
+                    </div>
+
+                <div class="all-logs-table-container">
+                        <!-- Fixed header -->
+                        <div class="log-header log-header-fixed">
+                            <span>Timestamp</span>
+                            <span>Service</span>
+                            <span>URL</span>
+                            <span>Status</span>
+                            <span>Latency</span>
+                            <span>Usage</span>
+                            <span>Actions</span>
+                        </div>
+
+                        <!-- Scrollable content -->
+                        <div class="all-log-entries-scrollable">
+                            <div v-if="allLogs.length === 0" class="log-entry loading">
+                                <span>{{ allLogsLoading ? 'Loading logs...' : 'No logs available' }}</span>
+                            </div>
+                            <div v-else v-for="log in allLogs" :key="log.id || log.timestamp" class="log-entry">
+                                <span>{{ formatTimestamp(log.timestamp) }}</span>
+                                <span :title="formatChannelName(log.channel)" style="white-space: pre-line;">{{ formatServiceWithChannel(log.service, log.channel) }}</span>
+                                <span class="url-column" :title="log.path">{{ formatMethodWithURL(log.method, log.path) }}</span>
+                                <span>
+                                    <el-tag
+                                        :type="getStatusTagType(log.status_code)"
+                                        size="small">
+                                        {{ log.status_code || '-' }}
+                                    </el-tag>
+                                </span>
+                                <span>{{ log.duration_ms ? `${log.duration_ms}ms` : '-' }}</span>
+                                <span class="usage-cell" :title="formatUsageSummary(log.usage, log.service)">
+                                    {{ formatUsageSummary(log.usage, log.service) }}
+                                </span>
+                                <span>
+                                    <el-button
+                                        type="primary"
+                                        size="small"
+                                        link
+                                        @click="showLogDetail(log)">
+                                        Details
+                                    </el-button>
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </el-drawer>
+
+        <!-- Model selection dialog -->
+        <el-dialog
+            v-model="modelSelectorVisible"
+            title="Select Model for Test"
+            :width="dialogSizes.modelSelector"
+            @close="cancelModelSelection">
+            <div class="model-selector-content">
+                <el-form
+                    :model="testConfig"
+                    :label-width="isMobileViewport ? 'auto' : '80px'"
+                    :label-position="isMobileViewport ? 'top' : 'right'">
+                    <el-form-item label="Model:">
+                        <el-select
+                            v-model="testConfig.model"
+                            placeholder="Select or enter a model name"
+                            style="width: 100%"
+                            filterable
+                            allow-create>
+                            <el-option
+                                v-for="model in getModelOptions(testConfig.service)"
+                                :key="model.value"
+                                :label="model.label"
+                                :value="model.value">
+                            </el-option>
+                        </el-select>
+                    </el-form-item>
+                    <el-form-item v-if="testConfig.service === 'codex'" label="Reasoning Effort:">
+                        <el-select
+                            v-model="testConfig.reasoningEffort"
+                            placeholder="Select a reasoning level"
+                            style="width: 100%">
+                            <el-option label="high" value="high"></el-option>
+                            <el-option label="medium" value="medium"></el-option>
+                            <el-option label="low" value="low"></el-option>
+                        </el-select>
+                    </el-form-item>
+                    <el-form-item v-if="testConfig.service === 'codex'" label="Reasoning Summary:">
+                        <el-select
+                            v-model="testConfig.reasoningSummary"
+                            placeholder="Select a summary mode"
+                            style="width: 100%">
+                            <el-option label="off" value="off"></el-option>
+                            <el-option label="auto" value="auto"></el-option>
+                            <el-option label="detailed" value="detailed"></el-option>
+                        </el-select>
+                    </el-form-item>
+                </el-form>
+
+                <!-- Test result area -->
+                <div v-if="lastTestResult.status_code !== null || testingConnection" class="test-result-section" style="margin-top: 20px; border-top: 1px solid #e4e7ed; padding-top: 16px;">
+                    <h4 style="margin: 0 0 12px 0; font-size: 14px; color: #606266;">Test Result</h4>
+
+                    <div v-if="testingConnection" style="text-align: center; padding: 20px;">
+                        <el-icon class="is-loading" style="font-size: 20px; margin-bottom: 8px;"><Loading /></el-icon>
+                        <div style="color: #909399;">Testing connectivity...</div>
+                    </div>
+
+                    <div v-else-if="lastTestResult.status_code !== null">
+                        <div class="test-result-summary">
+                            <div class="result-item">
+                                <span class="result-label">Status:</span>
+                                <el-tag :type="lastTestResult.success ? 'success' : 'danger'" size="default">
+                                    {{ lastTestResult.success ? 'Connected' : 'Failed' }}
+                                </el-tag>
+                            </div>
+                            <div class="result-item">
+                                <span class="result-label">Status Code:</span>
+                                <span class="result-value">{{ lastTestResult.status_code || '-' }}</span>
+                            </div>
+                            <div class="result-item">
+                                <span class="result-label">Target URL:</span>
+                                <span class="result-value">{{ lastTestResult.target_url || '-' }}</span>
+                            </div>
+                            <div v-if="lastTestResult.error_message" class="result-item">
+                                <span class="result-label">Error:</span>
+                                <span class="result-value error">{{ lastTestResult.error_message }}</span>
+                            </div>
+                        </div>
+
+                        <div v-if="lastTestResult.status_code !== null" class="test-response-section" style="margin-top: 16px;">
+                            <h5 style="margin: 0 0 8px 0; font-size: 13px; color: #606266;">Response Data:</h5>
+                            <el-input
+                                v-model="lastTestResult.response_text"
+                                type="textarea"
+                                :rows="6"
+                                readonly
+                                placeholder="No response data">
+                            </el-input>
+                            <div class="response-actions" style="margin-top: 8px; text-align: right;">
+                                <el-button size="small" @click="copyTestResult">Copy Response</el-button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <template #footer>
+                <span class="dialog-footer">
+                    <el-button @click="cancelModelSelection">
+                        {{ lastTestResult.status_code !== null ? 'Close' : 'Cancel' }}
+                    </el-button>
+                    <el-button
+                        v-if="lastTestResult.status_code === null"
+                        type="primary"
+                        @click="confirmModelSelection"
+                        :loading="testingConnection">
+                        Start Test
+                    </el-button>
+                    <el-button
+                        v-else
+                        type="primary"
+                        @click="confirmModelSelection"
+                        :loading="testingConnection">
+                        Retest
+                    </el-button>
+                </span>
+            </template>
+        </el-dialog>
+
+        <!-- Usage detail drawer -->
+        <el-drawer
+            v-model="usageDrawerVisible"
+            title="Token Usage Details"
+            :size="drawerSizes.usage"
+            class="usage-drawer">
+            <div class="usage-drawer-content" v-loading="usageDetailsLoading">
+                <div class="usage-summary-card">
+                    <h3>Overall Summary</h3>
+                    <div class="usage-summary-grid">
+                        <div class="usage-summary-item" v-for="key in metricKeys" :key="key">
+                            <span class="usage-label">{{ usageMetricLabels[key] }}:</span>
+                            <span class="usage-value">{{ getUsageFormattedValue(usageDetails.totals, key) }}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="usage-service-section" v-for="(serviceData, serviceName) in usageDetails.services" :key="serviceName">
+                    <div class="usage-service-header">
+                        <h3>{{ serviceName }} CLI</h3>
+                        <span class="usage-total">Total {{ getUsageFormattedValue(serviceData.overall, 'total') }}</span>
+                    </div>
+                    <div class="usage-summary-grid service-overall">
+                        <div class="usage-summary-item" v-for="key in metricKeys" :key="key">
+                            <span class="usage-label">{{ usageMetricLabels[key] }}:</span>
+                            <span class="usage-value">{{ getUsageFormattedValue(serviceData.overall, key) }}</span>
+                        </div>
+                    </div>
+                    <div v-if="Object.keys(serviceData.channels).length" class="usage-channel-table">
+                        <div class="usage-channel-header">
+                            <span>Target</span>
+                            <span v-for="key in metricKeys" :key="key">{{ usageMetricLabels[key] }}</span>
+                        </div>
+                        <div class="usage-channel-row" v-for="(channelData, channelName) in serviceData.channels" :key="channelName">
+                            <span class="channel-name">{{ formatChannelName(channelName) }}</span>
+                            <span v-for="key in metricKeys" :key="key">{{ getUsageFormattedValue(channelData, key) }}</span>
+                        </div>
+                    </div>
+                    <div v-else class="usage-channel-empty">No channel data</div>
+                </div>
+
+                <div class="usage-drawer-actions">
+                    <el-button type="primary" size="small" @click="loadUsageDetails" :loading="usageDetailsLoading">Refresh</el-button>
+                    <el-button type="danger" size="small" @click="clearUsageData">Clear Tokens</el-button>
+                    <el-button size="small" @click="closeUsageDrawer">Close</el-button>
+                </div>
+            </div>
+        </el-drawer>
+
+        <!-- Realtime request detail drawer -->
+        <el-drawer
+            v-model="realtimeDetailVisible"
+            title="Realtime Request Detail"
+            :size="drawerSizes.realtime"
+            direction="rtl"
+            class="realtime-detail-drawer">
+
+            <div v-if="selectedRealtimeRequest" class="realtime-detail-content">
+                <div class="detail-basic-info">
+                    <el-descriptions title="Basic Information" :column="2" border>
+                        <el-descriptions-item label="Request ID">
+                            {{ selectedRealtimeRequest.request_id }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Service">
+                            {{ selectedRealtimeRequest.service }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Channel">
+                            {{ selectedRealtimeRequest.channel }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Status">
+                            <el-tag :type="getStatusDisplay(selectedRealtimeRequest.status).type">
+                                {{ getStatusDisplay(selectedRealtimeRequest.status).text }}
+                            </el-tag>
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Method">
+                            {{ selectedRealtimeRequest.method }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Path">
+                            {{ selectedRealtimeRequest.path }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Latency">
+                            {{ selectedRealtimeRequest.displayDuration }}ms
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Status Code" v-if="selectedRealtimeRequest.status_code">
+                            {{ selectedRealtimeRequest.status_code }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Start Time">
+                            {{ formatRealtimeTime(selectedRealtimeRequest.start_time) }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Target URL" v-if="selectedRealtimeRequest.target_url">
+                            {{ selectedRealtimeRequest.target_url }}
+                        </el-descriptions-item>
+                    </el-descriptions>
+                </div>
+
+                <div class="detail-response-section">
+                    <h4>Realtime Response Stream</h4>
+                    <div class="response-stream-container">
+                        <div class="response-stream-content">
+                            <pre v-if="selectedRealtimeRequest.responseText">{{ selectedRealtimeRequest.responseText }}</pre>
+                            <div v-else class="no-response">No response data...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="detail-headers-section" v-if="selectedRealtimeRequest.request_headers">
+                    <h4>Request Headers</h4>
+                    <div class="headers-content">
+                        <pre>{{ JSON.stringify(selectedRealtimeRequest.request_headers, null, 2) }}</pre>
+                    </div>
+                </div>
+            </div>
+        </el-drawer>
+
+        <!-- Model|Config to Model mapping drawer -->
+        <el-drawer
+            v-model="modelMappingDrawerVisible"
+            title="Model|Config ➝ Model Mapping"
+            :size="drawerSizes.modelMapping"
+            direction="rtl"
+            class="mapping-drawer">
+            <div class="mapping-drawer-content">
+                <div class="mapping-tabs">
+                    <el-tabs type="border-card" v-model="activeModelMappingTab">
+                        <el-tab-pane label="Claude Model Mapping" name="claude">
+                            <div class="mapping-section">
+                                <div class="mapping-header">
+                                    <h4>Claude mapping rules</h4>
+                                    <el-button type="primary" size="small" @click="addModelMapping('claude')">
+                                        <i class="el-icon-plus"></i> Add Mapping
+                                    </el-button>
+                                </div>
+                                
+                                <div class="mapping-list" v-if="routingConfig.modelMappings.claude.length > 0">
+                                    <div class="mapping-item" v-for="(mapping, index) in routingConfig.modelMappings.claude" :key="index">
+                                        <div class="mapping-form-horizontal">
+                                            <div class="mapping-field-group">
+                                                <div class="mapping-field-compact">
+                                                    <label>Source Type:</label>
+                                                    <el-select
+                                                        v-model="mapping.source_type"
+                                                        placeholder="Select type"
+                                                        size="small"
+                                                        style="width: 80px;">
+                                                        <el-option label="Model" value="model"></el-option>
+                                                        <el-option label="Config" value="config"></el-option>
+                                                    </el-select>
+                                                </div>
+                                                <div class="mapping-field-compact">
+                                                    <label v-if="mapping.source_type === 'model'">Source Model:</label>
+                                                    <label v-else>Use Config:</label>
+                                                    <el-select
+                                                        v-if="mapping.source_type === 'config'"
+                                                        v-model="mapping.source"
+                                                        placeholder="Select config"
+                                                        size="small"
+                                                        style="width: 520px;">
+                                                        <el-option
+                                                            v-for="config in claudeConfigs"
+                                                            :key="config"
+                                                            :label="config"
+                                                            :value="config">
+                                                        </el-option>
+                                                    </el-select>
+                                                    <el-input
+                                                        v-else
+                                                        v-model="mapping.source"
+                                                        placeholder="e.g., claude-sonnet-4-20250514"
+                                                        size="small"
+                                                        style="width: 220px;">
+                                                    </el-input>
+                                                </div>
+                                                <div class="mapping-arrow-compact">→</div>
+                                                <div class="mapping-field-compact">
+                                                    <label>Target Model:</label>
+                                                    <el-input
+                                                        v-model="mapping.target"
+                                                        placeholder="e.g., claude-opus-4-1-20250805"
+                                                        size="small"
+                                                        style="width: 220px;">
+                                                    </el-input>
+                                                </div>
+                                                <div class="mapping-actions-compact">
+                                                    <el-button
+                                                        type="danger"
+                                                        size="small"
+                                                        @click="removeModelMapping('claude', index)">
+                                                        Delete
+                                                    </el-button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="empty-mapping" v-else>
+                                    <p>No mapping yet. Click "Add Mapping" to create one.</p>
+                                </div>
+                            </div>
+                        </el-tab-pane>
+                        
+                        <el-tab-pane label="Codex Model Mapping" name="codex">
+                            <div class="mapping-section">
+                                <div class="mapping-header">
+                                    <h4>Codex mapping rules</h4>
+                                    <el-button type="primary" size="small" @click="addModelMapping('codex')">
+                                        <i class="el-icon-plus"></i> Add Mapping
+                                    </el-button>
+                                </div>
+                                
+                                <div class="mapping-list" v-if="routingConfig.modelMappings.codex.length > 0">
+                                    <div class="mapping-item" v-for="(mapping, index) in routingConfig.modelMappings.codex" :key="index">
+                                        <div class="mapping-form-horizontal">
+                                            <div class="mapping-field-group">
+                                                <div class="mapping-field-compact">
+                                                    <label>Source Type:</label>
+                                                    <el-select
+                                                        v-model="mapping.source_type"
+                                                        placeholder="Select type"
+                                                        size="small"
+                                                        style="width: 80px;">
+                                                        <el-option label="Model" value="model"></el-option>
+                                                        <el-option label="Config" value="config"></el-option>
+                                                    </el-select>
+                                                </div>
+                                                <div class="mapping-field-compact">
+                                                    <label v-if="mapping.source_type === 'model'">Source Model:</label>
+                                                    <label v-else>Use Config:</label>
+                                                    <el-select
+                                                        v-if="mapping.source_type === 'config'"
+                                                        v-model="mapping.source"
+                                                        placeholder="Select config"
+                                                        size="small"
+                                                        style="width: 520px;">
+                                                        <el-option
+                                                            v-for="config in codexConfigs"
+                                                            :key="config"
+                                                            :label="config"
+                                                            :value="config">
+                                                        </el-option>
+                                                    </el-select>
+                                                    <el-input
+                                                        v-else
+                                                        v-model="mapping.source"
+                                                        placeholder="e.g., gpt-5-codex"
+                                                        size="small"
+                                                        style="width: 220px;">
+                                                    </el-input>
+                                                </div>
+                                                <div class="mapping-arrow-compact">→</div>
+                                                <div class="mapping-field-compact">
+                                                    <label>Target Model:</label>
+                                                    <el-input
+                                                        v-model="mapping.target"
+                                                        placeholder="e.g., gpt-5-codex"
+                                                        size="small"
+                                                        style="width: 220px;">
+                                                    </el-input>
+                                                </div>
+                                                <div class="mapping-actions-compact">
+                                                    <el-button
+                                                        type="danger"
+                                                        size="small"
+                                                        @click="removeModelMapping('codex', index)">
+                                                        Delete
+                                                    </el-button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="empty-mapping" v-else>
+                                    <p>No mapping yet. Click "Add Mapping" to create one.</p>
+                                </div>
+                            </div>
+                        </el-tab-pane>
+                    </el-tabs>
+                </div>
+                
+                <div class="mapping-footer">
+                    <el-button @click="closeModelMappingDrawer">Cancel</el-button>
+                    <el-button type="primary" @click="saveRoutingConfig" :loading="routingConfigSaving">
+                        Save Configuration
+                    </el-button>
+                </div>
+            </div>
+        </el-drawer>
+
+        <!-- Model to Config mapping drawer -->
+        <el-drawer 
+            v-model="configMappingDrawerVisible" 
+            title="Model ➝ Config Mapping" 
+            :size="drawerSizes.configMapping" 
+            direction="rtl"
+            class="mapping-drawer">
+            <div class="mapping-drawer-content">
+                <div class="mapping-tabs">
+                    <el-tabs type="border-card" v-model="activeConfigMappingTab">
+                        <el-tab-pane label="Claude Config Mapping" name="claude">
+                            <div class="mapping-section">
+                                <div class="mapping-header">
+                                    <h4>Claude mapping rules</h4>
+                                    <el-button type="primary" size="small" @click="addConfigMapping('claude')">
+                                        <i class="el-icon-plus"></i> Add Mapping
+                                    </el-button>
+                                </div>
+                                
+                                <div class="mapping-list" v-if="routingConfig.configMappings.claude.length > 0">
+                                    <div class="mapping-item" v-for="(mapping, index) in routingConfig.configMappings.claude" :key="index">
+                                        <div class="mapping-form">
+                                            <div class="mapping-field">
+                                                <label>Model Name:</label>
+                                                <el-input 
+                                                    v-model="mapping.model" 
+                                                    placeholder="e.g., claude-sonnet-4-20250514"
+                                                    size="small">
+                                                </el-input>
+                                            </div>
+                                            <div class="mapping-arrow">→</div>
+                                            <div class="mapping-field">
+                                                <label>Assign Config:</label>
+                                                <el-select 
+                                                    v-model="mapping.config" 
+                                                    placeholder="Select config"
+                                                    size="small">
+                                                    <el-option 
+                                                        v-for="config in claudeConfigs" 
+                                                        :key="config" 
+                                                        :label="config" 
+                                                        :value="config">
+                                                    </el-option>
+                                                </el-select>
+                                            </div>
+                                            <div class="mapping-actions">
+                                                <el-button 
+                                                    type="danger" 
+                                                    size="small" 
+                                                    @click="removeConfigMapping('claude', index)">
+                                                    Delete
+                                                </el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="empty-mapping" v-else>
+                                    <p>No mapping yet. Click "Add Mapping" to create one.</p>
+                                </div>
+                            </div>
+                        </el-tab-pane>
+                        
+                        <el-tab-pane label="Codex Config Mapping" name="codex">
+                            <div class="mapping-section">
+                                <div class="mapping-header">
+                                    <h4>Codex mapping rules</h4>
+                                    <el-button type="primary" size="small" @click="addConfigMapping('codex')">
+                                        <i class="el-icon-plus"></i> Add Mapping
+                                    </el-button>
+                                </div>
+                                
+                                <div class="mapping-list" v-if="routingConfig.configMappings.codex.length > 0">
+                                    <div class="mapping-item" v-for="(mapping, index) in routingConfig.configMappings.codex" :key="index">
+                                        <div class="mapping-form">
+                                            <div class="mapping-field">
+                                                <label>Model Name:</label>
+                                                <el-input 
+                                                    v-model="mapping.model" 
+                                                    placeholder="e.g., gpt-5-codex"
+                                                    size="small">
+                                                </el-input>
+                                            </div>
+                                            <div class="mapping-arrow">→</div>
+                                            <div class="mapping-field">
+                                                <label>Assign Config:</label>
+                                                <el-select 
+                                                    v-model="mapping.config" 
+                                                    placeholder="Select config"
+                                                    size="small">
+                                                    <el-option 
+                                                        v-for="config in codexConfigs" 
+                                                        :key="config" 
+                                                        :label="config" 
+                                                        :value="config">
+                                                    </el-option>
+                                                </el-select>
+                                            </div>
+                                            <div class="mapping-actions">
+                                                <el-button 
+                                                    type="danger" 
+                                                    size="small" 
+                                                    @click="removeConfigMapping('codex', index)">
+                                                    Delete
+                                                </el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="empty-mapping" v-else>
+                                    <p>No mapping yet. Click "Add Mapping" to create one.</p>
+                                </div>
+                            </div>
+                        </el-tab-pane>
+                    </el-tabs>
+                </div>
+                
+                <div class="mapping-footer">
+                    <el-button @click="closeConfigMappingDrawer">Cancel</el-button>
+                    <el-button type="primary" @click="saveRoutingConfig" :loading="routingConfigSaving">
+                        Save Configuration
+                    </el-button>
+                </div>
+            </div>
+        </el-drawer>
+
+        <!-- Add site group dialog -->
+        <el-dialog
+            v-model="mergedDialogVisible"
+            :title="mergedDialogMode === 'edit' ? 'Edit Site Group' : 'Add Site Group'"
+            :width="dialogSizes.mergedGroup"
+            :fullscreen="isMobileViewport"
+            @close="cancelMergedDialog">
+
+            <el-form
+                :model="mergedDialogDraft"
+                :label-width="isMobileViewport ? 'auto' : '100px'"
+                :label-position="isMobileViewport ? 'top' : 'right'">
+                <el-form-item label="Upstream URL:" required>
+                    <el-input
+                        v-model="mergedDialogDraft.baseUrl"
+                        placeholder="https://api.example.com">
+                    </el-input>
+                </el-form-item>
+
+                <el-form-item label="Weight:">
+                    <el-input-number
+                        v-model="mergedDialogDraft.weight"
+                        :min="0"
+                        :step="1">
+                    </el-input-number>
+                </el-form-item>
+
+                <el-form-item label="Authentication Method:">
+                    <el-radio-group v-model="mergedDialogDraft.authType">
+                        <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                        <el-radio-button label="api_key">API Key</el-radio-button>
+                    </el-radio-group>
+                </el-form-item>
+
+                <div class="dialog-entries-container">
+                    <div
+                        v-for="(entry, index) in mergedDialogDraft.entries"
+                        :key="index"
+                        class="dialog-entry-row">
+                        <el-input
+                            v-model="entry.name"
+                            placeholder="Site name"
+                            :style="isMobileViewport ? {} : { width: '180px' }">
+                        </el-input>
+                        <el-input
+                            v-model="entry.authValue"
+                            placeholder="Credential"
+                            type="password"
+                            show-password
+                            :style="isMobileViewport ? {} : { width: '280px' }">
+                        </el-input>
+                        <el-switch v-model="entry.active"></el-switch>
+                        <el-button
+                            type="danger"
+                            size="small"
+                            @click="removeDialogEntry(index)">
+                            Delete
+                        </el-button>
+                    </div>
+
+                    <el-button
+                        type="success"
+                        size="small"
+                        @click="addDialogEntry"
+                        style="margin-top: 8px;">
+                        <i class="el-icon-plus"></i> Add Credential
+                    </el-button>
+                </div>
+            </el-form>
+
+            <template #footer>
+                <el-button @click="cancelMergedDialog">Cancel</el-button>
+                <el-button
+                    type="primary"
+                    @click="submitMergedDialog"
+                    :loading="configSaving">
+                    {{ mergedDialogMode === 'edit' ? 'Save Configuration' : 'Confirm Add' }}
+                </el-button>
+            </template>
+        </el-dialog>
+    </div>
+
+    <!-- Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- Element Plus -->
+    <script src="https://unpkg.com/element-plus@2.8.0/dist/index.full.js"></script>
+    <!-- Realtime connection manager -->
+    <script src="/static/realtime-manager.js"></script>
+    <!-- Application logic -->
+    <script src="/static/app.js"></script>
+    
+    <script>
+    // Ensure libraries are loaded before initialization
+    window.addEventListener('DOMContentLoaded', function() {
+        // Verify Vue and Element Plus load correctly
+        if (typeof Vue === 'undefined') {
+            console.error('Vue failed to load');
+            document.getElementById('app').innerHTML = '<h1>Vue failed to load. Please check the network connection.</h1>';
+            return;
+        }
+        
+        if (typeof ElementPlus === 'undefined') {
+            console.error('Element Plus failed to load');
+            document.getElementById('app').innerHTML = '<h1>Element Plus failed to load. Please check the network connection.</h1>';
+            return;
+        }
+        
+        console.log('Vue and Element Plus loaded. app.js should initialize the app automatically.');
+    });
+    </script>
+</body>
+</html>
