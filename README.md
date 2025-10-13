@@ -14,13 +14,7 @@ CLP is a local CLI proxy that manages and forwards API requests to AI providers 
 
 ## UI Preview
 
-![Overview](assets/index.jpeg)
-![Config](assets/config.jpeg)
-![Filters](assets/filter.jpeg)
-![Request Detail](assets/request_detail.jpeg)
-![Token Usage](assets/token_use.jpeg)
-![Load Balancer](assets/lb.jpeg)
-![Model Router](assets/model_router.jpeg)
+<img width="1145" height="1270" alt="chrome_JrEYQkydwH" src="https://github.com/user-attachments/assets/e182b9ea-cc35-4b4e-9d97-659e218af524" />
 
 ## Features
 
