@@ -264,9 +264,9 @@ Create `~/.clp/filter.json` rules to redact/replace sensitive values before forw
 
 MIT License
 
-## Author
+## Authors
 
-gjp
+gjp, edxeth
 
 ---
 
