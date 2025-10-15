@@ -4,6 +4,7 @@ import aiohttp
 import logging
 import datetime
 import json
+import secrets
 import uuid
 from typing import Dict, Optional, Tuple
 from pathlib import Path
@@ -101,15 +102,15 @@ class ClaudeProxy(BaseProxyService):
         ensure_header('anthropic-dangerous-direct-browser-access', 'true')
 
         if header_missing('anthropic-beta'):
-            beta_flags = [
+            count_tokens = 'count_tokens' in path.lower()
+            base_flags = [
                 'interleaved-thinking-2025-05-14',
-                'fine-grained-tool-streaming-2025-05-14'
+                'fine-grained-tool-streaming-2025-05-14',
             ]
-            if 'count_tokens' in path.lower():
-                beta_flags.append('token-counting-2024-11-01')
-                beta_flags.insert(0, 'claude-code-20250219')
+            if count_tokens:
+                beta_flags = ['claude-code-20250219', *base_flags, 'token-counting-2024-11-01']
             else:
-                beta_flags.insert(0, 'claude-code-20250219')
+                beta_flags = base_flags
             ensure_header('anthropic-beta', ','.join(beta_flags))
 
         # Canonicalize headers expected by Claude Code upstream
@@ -157,26 +158,35 @@ class ClaudeProxy(BaseProxyService):
 
     def _default_metadata_user_id(self) -> str:
         """Return a stable metadata user identifier for Claude Code."""
-        return self._metadata_user_id
+        return f'user_{self._metadata_account_id}_account__session_{self._metadata_session_id}'
 
     def _load_or_create_metadata_user_id(self) -> str:
         """Persist a realistic-looking metadata user id to align with Claude Code expectations."""
-        meta_file = self.config_dir / 'claude_metadata_user_id'
+        meta_file = self.data_dir / 'claude_metadata.json'
+        account_id = None
+        session_id = None
+
         if meta_file.exists():
             try:
-                value = meta_file.read_text(encoding='utf-8').strip()
-                if value:
-                    return value
-            except OSError:
-                pass
+                data = json.loads(meta_file.read_text(encoding='utf-8'))
+                account_id = data.get('account_id')
+                session_id = data.get('session_id')
+            except (OSError, json.JSONDecodeError):
+                account_id = session_id = None
 
-        new_value = f"user_{uuid.uuid4().hex}_cli_proxy_account__session_{uuid.uuid4()}"
+        if not account_id:
+            account_id = secrets.token_hex(32)  # 64 hex characters similar to real account ids
+        if not session_id:
+            session_id = str(uuid.uuid4())
+
         try:
-            meta_file.write_text(new_value, encoding='utf-8')
+            meta_file.write_text(json.dumps({'account_id': account_id, 'session_id': session_id}, indent=2), encoding='utf-8')
         except OSError:
-            # If we cannot persist, still return the generated value
-            return new_value
-        return new_value
+            pass
+
+        self._metadata_account_id = account_id
+        self._metadata_session_id = session_id
+        return f'user_{account_id}_account__session_{session_id}'
 
     def test_endpoint(self, model: str, base_url: str, auth_token: str = None, api_key: str = None, extra_params: dict = None) -> dict:
         """Test connectivity against an upstream Claude API endpoint."""
