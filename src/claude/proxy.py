@@ -3,8 +3,12 @@
 import aiohttp
 import logging
 import datetime
+import json
+from typing import Dict, Optional, Tuple
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
 from ..core.base_proxy import BaseProxyService
 from ..config.cached_config_manager import claude_config_manager
 
@@ -43,6 +47,111 @@ class ClaudeProxy(BaseProxyService):
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
             self.logger.propagate = False
+
+    def build_target_param(
+        self, path: str, request: Request, body: bytes
+    ) -> Tuple[str, Dict, bytes, Optional[str]]:
+        """Extend base routing with Claude-specific defaults."""
+        target_url, headers, modified_body, active_config_name = super().build_target_param(path, request, body)
+
+        parsed = urlsplit(target_url)
+        query_items = parse_qsl(parsed.query, keep_blank_values=True)
+        if not any(key.lower() == 'beta' for key, _ in query_items):
+            query_items.append(('beta', 'true'))
+        new_query = urlencode(query_items, doseq=True)
+        if new_query != parsed.query:
+            parsed = parsed._replace(query=new_query)
+            target_url = urlunsplit(parsed)
+
+        def find_header(name: str):
+            lower_name = name.lower()
+            for key, value in headers.items():
+                if key.lower() == lower_name:
+                    return key, value
+            return None, None
+
+        def set_header(name: str, value: str):
+            key, _ = find_header(name)
+            if key is None:
+                headers[name] = value
+            else:
+                headers[key] = value
+
+        def ensure_header(name: str, value: str):
+            key, current = find_header(name)
+            if key is None:
+                headers[name] = value
+            elif not (isinstance(current, str) and current.strip()):
+                headers[key] = value
+
+        def header_missing(name: str) -> bool:
+            key, current = find_header(name)
+            if key is None:
+                return True
+            if isinstance(current, str):
+                return not current.strip()
+            return current in (None, '')
+
+        ensure_header('anthropic-version', '2023-06-01')
+        ensure_header('x-app', 'cli')
+        ensure_header('anthropic-dangerous-direct-browser-access', 'true')
+
+        if header_missing('anthropic-beta'):
+            beta_flags = [
+                'claude-code-20250219',
+                'interleaved-thinking-2025-05-14',
+                'fine-grained-tool-streaming-2025-05-14'
+            ]
+            if 'count_tokens' in path.lower():
+                beta_flags.append('token-counting-2024-11-01')
+            ensure_header('anthropic-beta', ','.join(beta_flags))
+
+        # Canonicalize headers expected by Claude Code upstream
+        set_header('user-agent', 'claude-cli/2.0.15 (external, cli)')
+        set_header('accept-encoding', 'gzip, deflate')
+        set_header('accept-language', '*')
+        set_header('x-stainless-arch', 'x64')
+        set_header('x-stainless-helper-method', 'stream')
+        set_header('x-stainless-lang', 'js')
+        set_header('x-stainless-os', 'Linux')
+        set_header('x-stainless-package-version', '0.60.0')
+        set_header('x-stainless-retry-count', '0')
+        set_header('x-stainless-runtime', 'node')
+        set_header('x-stainless-runtime-version', 'v24.8.0')
+        set_header('x-stainless-timeout', '600')
+
+        if not header_missing('x-api-key'):
+            auth_key, _ = find_header('authorization')
+            if auth_key:
+                headers.pop(auth_key, None)
+
+        modified_body = self._ensure_metadata(modified_body)
+
+        return target_url, headers, modified_body, active_config_name
+
+    def _ensure_metadata(self, body: bytes) -> bytes:
+        """Ensure Claude Code metadata payload is present."""
+        if not body:
+            return body
+        try:
+            payload = json.loads(body.decode('utf-8'))
+        except Exception:
+            return body
+
+        if isinstance(payload, dict) and 'metadata' not in payload:
+            payload['metadata'] = {
+                'user_id': self._default_metadata_user_id()
+            }
+            try:
+                return json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            except Exception:
+                return body
+
+        return body
+
+    def _default_metadata_user_id(self) -> str:
+        """Return a stable metadata user identifier for Claude Code."""
+        return 'user_cli_proxy_account__session_default'
 
     def test_endpoint(self, model: str, base_url: str, auth_token: str = None, api_key: str = None, extra_params: dict = None) -> dict:
         """Test connectivity against an upstream Claude API endpoint."""

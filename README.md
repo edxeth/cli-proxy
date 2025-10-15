@@ -114,6 +114,11 @@ clp active codex dev
 ```
 2) Restart Claude Code after `clp start`.
 
+### What the Claude proxy adds for you
+- **Header normalisation:** requests are forwarded with the same header shape used by the official Claude Code CLI (e.g. `claude-cli/2.0.15` user agent, canonical `x-stainless-*` values, `Accept-Language: *`). This avoids “credential only authorised for Claude Code” errors on providers such as GACCode.
+- **Automatic `metadata.user_id`:** if the client omits the Claude-specific metadata block, the proxy injects a stable placeholder so upstream APIs still treat the call as coming from Claude Code.
+- **Bearer sanitising:** when an `x-api-key` is present the proxy strips any `Authorization: Bearer …` header, matching the behaviour of the real CLI and preventing key-scope validation failures.
+
 ## Using with Codex CLI (OpenAI “Responses” API)
 
 The Codex proxy supports OpenAI’s Responses wire protocol and works with custom base URLs.
