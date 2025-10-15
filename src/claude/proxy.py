@@ -4,6 +4,7 @@ import aiohttp
 import logging
 import datetime
 import json
+import uuid
 from typing import Dict, Optional, Tuple
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -47,6 +48,9 @@ class ClaudeProxy(BaseProxyService):
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
             self.logger.propagate = False
+
+        # Generate a stable metadata identifier so upstream sees a consistent session
+        self._metadata_user_id = self._load_or_create_metadata_user_id()
 
     def build_target_param(
         self, path: str, request: Request, body: bytes
@@ -98,16 +102,18 @@ class ClaudeProxy(BaseProxyService):
 
         if header_missing('anthropic-beta'):
             beta_flags = [
-                'claude-code-20250219',
                 'interleaved-thinking-2025-05-14',
                 'fine-grained-tool-streaming-2025-05-14'
             ]
             if 'count_tokens' in path.lower():
                 beta_flags.append('token-counting-2024-11-01')
+                beta_flags.insert(0, 'claude-code-20250219')
+            else:
+                beta_flags.insert(0, 'claude-code-20250219')
             ensure_header('anthropic-beta', ','.join(beta_flags))
 
         # Canonicalize headers expected by Claude Code upstream
-        set_header('user-agent', 'claude-cli/2.0.15 (external, cli)')
+        set_header('user-agent', 'claude-cli/2.0.17 (external, cli)')
         set_header('accept-encoding', 'gzip, deflate')
         set_header('accept-language', '*')
         set_header('x-stainless-arch', 'x64')
@@ -151,7 +157,26 @@ class ClaudeProxy(BaseProxyService):
 
     def _default_metadata_user_id(self) -> str:
         """Return a stable metadata user identifier for Claude Code."""
-        return 'user_cli_proxy_account__session_default'
+        return self._metadata_user_id
+
+    def _load_or_create_metadata_user_id(self) -> str:
+        """Persist a realistic-looking metadata user id to align with Claude Code expectations."""
+        meta_file = self.config_dir / 'claude_metadata_user_id'
+        if meta_file.exists():
+            try:
+                value = meta_file.read_text(encoding='utf-8').strip()
+                if value:
+                    return value
+            except OSError:
+                pass
+
+        new_value = f"user_{uuid.uuid4().hex}_cli_proxy_account__session_{uuid.uuid4()}"
+        try:
+            meta_file.write_text(new_value, encoding='utf-8')
+        except OSError:
+            # If we cannot persist, still return the generated value
+            return new_value
+        return new_value
 
     def test_endpoint(self, model: str, base_url: str, auth_token: str = None, api_key: str = None, extra_params: dict = None) -> dict:
         """Test connectivity against an upstream Claude API endpoint."""
