@@ -116,4 +116,7 @@ pids
 temp/
 tmp/
 
+# Uv package manager lockfile
+uv.lock
+
 nul
