@@ -663,9 +663,65 @@ class _ChatCompletionsSseTransformer:
         if not self._buffer:
             return b''
 
+        buffer_text = self._buffer.decode('utf-8')
+        upstream = None
+
+        # Try to parse as JSON first (non-streaming response)
         try:
-            upstream = json.loads(self._buffer.decode('utf-8'))
+            upstream = json.loads(buffer_text)
         except Exception:
+            # If JSON parse fails, try to parse as SSE stream
+            # (when stream=true causes upstream to send SSE format)
+            try:
+                chunks = buffer_text.split('\n')
+                tool_calls_found = None
+                last_choice = None
+                last_message = {}
+
+                for line in chunks:
+                    line = line.strip()
+                    if not line or line == '[DONE]':
+                        continue
+                    if line.startswith('data: '):
+                        try:
+                            chunk_data = json.loads(line[6:])  # Skip 'data: ' prefix
+                            if 'choices' in chunk_data and isinstance(chunk_data.get('choices'), list):
+                                choice = chunk_data['choices'][0] if chunk_data['choices'] else {}
+                                if isinstance(choice, dict):
+                                    last_choice = choice
+                                    # Extract tool_calls from delta
+                                    delta = choice.get('delta', {})
+                                    if isinstance(delta, dict):
+                                        if 'tool_calls' in delta:
+                                            tool_calls_found = delta['tool_calls']
+                                        if 'content' in delta and delta['content']:
+                                            last_message['content'] = delta.get('content', '')
+                                    # Also check message block
+                                    if 'message' in choice and isinstance(choice['message'], dict):
+                                        if 'tool_calls' in choice['message']:
+                                            tool_calls_found = choice['message']['tool_calls']
+                                        if 'content' in choice['message']:
+                                            last_message['content'] = choice['message']['content']
+                        except Exception:
+                            continue
+
+                # Reconstruct upstream response from collected chunks
+                if last_choice:
+                    upstream = {
+                        'choices': [{
+                            'message': dict(last_message),
+                            'finish_reason': last_choice.get('finish_reason', 'stop')
+                        }],
+                        'id': last_choice.get('id', f"chatcmpl-{uuid.uuid4().hex}"),
+                        'model': None,
+                        'created': int(time.time())
+                    }
+                    if tool_calls_found:
+                        upstream['choices'][0]['message']['tool_calls'] = tool_calls_found
+            except Exception:
+                pass
+
+        if not upstream:
             return bytes(self._buffer)
 
         error_info = upstream.get('error') if isinstance(upstream.get('error'), dict) else None
