@@ -489,6 +489,9 @@ class LegacyProxy(BaseProxyService):
                     payload['messages'] = _flatten_tool_messages(payload['messages'])
 
                 modified_body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+                # Log what we're sending upstream for Opus
+                if 'opus' in payload.get('model', '').lower():
+                    self.logger.info(f"Sending to upstream - model: {payload.get('model')}, stream: {payload.get('stream')}, has_tools: {bool(payload.get('tools'))}, messages: {len(payload.get('messages', []))}")
             else:
                 request.state.legacy_chatcompletions_stream = False
         
