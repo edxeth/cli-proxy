@@ -654,6 +654,7 @@ class _ChatCompletionsSseTransformer:
     def __init__(self):
         self._buffer = bytearray()
         self._processed = False  # Track if we've already converted and sent response
+        self._is_upstream_sse = False  # Track if upstream is sending SSE (not JSON)
         self.strip_content_length = True
         self.override_response_headers = {
             'Content-Type': 'text/event-stream',
@@ -675,17 +676,28 @@ class _ChatCompletionsSseTransformer:
 
     def process(self, chunk: bytes) -> bytes:
         """Process chunk and return SSE data immediately when response is complete."""
-        if self._processed:
-            # Already sent response, ignore subsequent chunks
+        if not chunk:
             return b''
 
-        if chunk:
-            self._buffer.extend(chunk)
+        # If upstream is already sending SSE, pass chunks through directly
+        if self._is_upstream_sse:
+            return chunk
 
-        # Try to parse JSON - if successful, we have complete response
+        self._buffer.extend(chunk)
+        buffer_text = self._buffer.decode('utf-8', errors='ignore')
+
+        # Detect if upstream is sending SSE format (not JSON)
+        if buffer_text.lstrip().startswith('data: '):
+            # Upstream is streaming SSE, not JSON - pass through directly
+            self._is_upstream_sse = True
+            self._processed = True
+            self.logger.info(f"SSE: Detected upstream is already SSE streaming, passing through")
+            return bytes(self._buffer)
+
+        # Try to parse as JSON - if successful, we have a complete response
         upstream = self._try_parse_json()
         if upstream:
-            # Response is complete, convert to SSE immediately
+            # Response is complete JSON, convert to SSE immediately
             self._processed = True
             self.logger.info(f"SSE: Complete JSON received ({len(self._buffer)} bytes), converting to SSE")
             return self._convert_to_sse(upstream)
@@ -784,6 +796,10 @@ class _ChatCompletionsSseTransformer:
         """Called after stream ends. If not yet processed, process now."""
         if self._processed:
             # Already processed in process(), nothing more to do
+            return b''
+
+        if self._is_upstream_sse:
+            # Already sent SSE passthrough, nothing more to do
             return b''
 
         # Fallback for edge cases where JSON wasn't complete
