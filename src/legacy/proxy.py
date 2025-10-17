@@ -654,6 +654,7 @@ class _ChatCompletionsSseTransformer:
             'Connection': 'keep-alive'
         }
         self.override_status_code = 200
+        self.logger = logging.getLogger('legacy_proxy')
 
     def process(self, chunk: bytes) -> bytes:
         if chunk:
@@ -790,13 +791,15 @@ class _ChatCompletionsSseTransformer:
                 text_value = ''.join(parts)
             # If content is None or any other type, text_value stays empty string
 
-            if text_value:
-                delta['content'] = text_value
+            # Always include content field for consistency, even if empty
+            # Droid CLI expects this field in all chunks
+            delta['content'] = text_value
 
             # Extract tool_calls if present and include in delta
             tool_calls = message_block.get('tool_calls')
             if isinstance(tool_calls, list) and tool_calls:
                 delta['tool_calls'] = tool_calls
+                self.logger.info(f"Response: tool_calls={len(tool_calls)} tools, content_len={len(text_value)}, delta_keys={list(delta.keys())}")
 
             events.append(_chunk(delta, None))
             events.append(_chunk({}, finish_reason, include_usage=True))
