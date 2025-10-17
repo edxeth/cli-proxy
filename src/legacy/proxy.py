@@ -646,10 +646,14 @@ class _ChatCompletionsSseTransformer:
     Handles both normal text responses and tool/function call responses, converting
     them into OpenAI-compatible SSE format for clients expecting streaming responses.
     Safely handles edge cases like missing messages or empty content.
+
+    OPTIMIZATION: Process response immediately upon receiving complete JSON to avoid
+    buffering delays that cause slow models (Opus) to timeout before first byte is sent.
     """
 
     def __init__(self):
         self._buffer = bytearray()
+        self._processed = False  # Track if we've already converted and sent response
         self.strip_content_length = True
         self.override_response_headers = {
             'Content-Type': 'text/event-stream',
@@ -659,73 +663,39 @@ class _ChatCompletionsSseTransformer:
         self.override_status_code = 200
         self.logger = logging.getLogger('legacy_proxy')
 
-    def process(self, chunk: bytes) -> bytes:
-        if chunk:
-            self._buffer.extend(chunk)
-        return b''
-
-    def flush(self) -> bytes:
+    def _try_parse_json(self) -> Optional[Dict[str, Any]]:
+        """Try to parse buffer as JSON, return parsed object or None if incomplete."""
         if not self._buffer:
+            return None
+        try:
+            return json.loads(self._buffer.decode('utf-8'))
+        except json.JSONDecodeError:
+            # JSON not yet complete
+            return None
+
+    def process(self, chunk: bytes) -> bytes:
+        """Process chunk and return SSE data immediately when response is complete."""
+        if self._processed:
+            # Already sent response, ignore subsequent chunks
             return b''
 
-        buffer_text = self._buffer.decode('utf-8')
-        upstream = None
+        if chunk:
+            self._buffer.extend(chunk)
 
-        # Try to parse as JSON first (non-streaming response)
-        try:
-            upstream = json.loads(buffer_text)
-        except Exception:
-            # If JSON parse fails, try to parse as SSE stream
-            # (when stream=true causes upstream to send SSE format)
-            try:
-                chunks = buffer_text.split('\n')
-                tool_calls_found = None
-                last_choice = None
-                last_message = {}
+        # Try to parse JSON - if successful, we have complete response
+        upstream = self._try_parse_json()
+        if upstream:
+            # Response is complete, convert to SSE immediately
+            self._processed = True
+            self.logger.info(f"SSE: Complete JSON received ({len(self._buffer)} bytes), converting to SSE")
+            return self._convert_to_sse(upstream)
 
-                for line in chunks:
-                    line = line.strip()
-                    if not line or line == '[DONE]':
-                        continue
-                    if line.startswith('data: '):
-                        try:
-                            chunk_data = json.loads(line[6:])  # Skip 'data: ' prefix
-                            if 'choices' in chunk_data and isinstance(chunk_data.get('choices'), list):
-                                choice = chunk_data['choices'][0] if chunk_data['choices'] else {}
-                                if isinstance(choice, dict):
-                                    last_choice = choice
-                                    # Extract tool_calls from delta
-                                    delta = choice.get('delta', {})
-                                    if isinstance(delta, dict):
-                                        if 'tool_calls' in delta:
-                                            tool_calls_found = delta['tool_calls']
-                                        if 'content' in delta and delta['content']:
-                                            last_message['content'] = delta.get('content', '')
-                                    # Also check message block
-                                    if 'message' in choice and isinstance(choice['message'], dict):
-                                        if 'tool_calls' in choice['message']:
-                                            tool_calls_found = choice['message']['tool_calls']
-                                        if 'content' in choice['message']:
-                                            last_message['content'] = choice['message']['content']
-                        except Exception:
-                            continue
+        # Not yet complete, wait for more chunks
+        return b''
 
-                # Reconstruct upstream response from collected chunks
-                if last_choice:
-                    upstream = {
-                        'choices': [{
-                            'message': dict(last_message),
-                            'finish_reason': last_choice.get('finish_reason', 'stop')
-                        }],
-                        'id': last_choice.get('id', f"chatcmpl-{uuid.uuid4().hex}"),
-                        'model': None,
-                        'created': int(time.time())
-                    }
-                    if tool_calls_found:
-                        upstream['choices'][0]['message']['tool_calls'] = tool_calls_found
-            except Exception:
-                pass
-
+    def _convert_to_sse(self, upstream: Dict[str, Any]) -> bytes:
+        """Convert parsed upstream response to SSE format."""
+        # upstream is already parsed JSON, extract response data
         if not upstream:
             return bytes(self._buffer)
 
@@ -809,6 +779,29 @@ class _ChatCompletionsSseTransformer:
 
         events.append('data: [DONE]\n\n')
         return ''.join(events).encode('utf-8')
+
+    def flush(self) -> bytes:
+        """Called after stream ends. If not yet processed, process now."""
+        if self._processed:
+            # Already processed in process(), nothing more to do
+            return b''
+
+        # Fallback for edge cases where JSON wasn't complete
+        # (shouldn't happen with normal upstream, but handle gracefully)
+        if not self._buffer:
+            return b''
+
+        try:
+            upstream = json.loads(self._buffer.decode('utf-8'))
+            if upstream:
+                self._processed = True
+                self.logger.info(f"SSE: Flushing buffered response ({len(self._buffer)} bytes)")
+                return self._convert_to_sse(upstream)
+        except json.JSONDecodeError:
+            pass
+
+        # If all else fails, return buffer as-is
+        return bytes(self._buffer)
 
 
 proxy_service = LegacyProxy()
