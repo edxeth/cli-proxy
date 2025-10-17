@@ -452,20 +452,22 @@ class LegacyProxy(BaseProxyService):
                 elif isinstance(stream_value, str):
                     streaming_requested = stream_value.strip().lower() not in {'', '0', 'false', 'no'}
 
-                # Enable SSE transformation if tools are present (with or without streaming requested)
-                # OR if streaming is explicitly requested
-                if has_tools or streaming_requested:
+                # Determine if SSE transformation is needed
+                if streaming_requested:
+                    # Client requested streaming
                     if has_tools:
                         # A4F API does NOT support streaming with tool calling
-                        # Send stream=False to get tool_calls, but still transform to SSE for client
+                        # Send stream=False to get tool_calls, but transform to SSE for client
                         payload['stream'] = False
                         request.state.legacy_chatcompletions_stream = True
                     else:
-                        # No tools, so respect the streaming preference
-                        request.state.legacy_chatcompletions_stream = streaming_requested
+                        # No tools, respect the streaming request
+                        request.state.legacy_chatcompletions_stream = True
                     headers['accept'] = 'application/json'
                 else:
-                    # No tools and no streaming requested
+                    # Client did NOT request streaming
+                    # Even if tools are present, send JSON response (don't transform to SSE)
+                    # The client expects JSON when they don't ask for streaming
                     request.state.legacy_chatcompletions_stream = False
 
                 converted_messages = self._wrap_convert_input_blocks(payload.get('input'))
