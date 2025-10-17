@@ -119,6 +119,7 @@ tmp/
 # Uv package manager lockfile
 uv.lock
 
-# AI related files (removed docs/ - we now track project documentation)
+# AI related files
+docs/
 
 nul
