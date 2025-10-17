@@ -50,6 +50,10 @@ src/
 │   ├── configs.py              # Codex config accessors
 │   ├── ctl.py                  # Codex controller
 │   └── proxy.py                # Codex proxy
+├── legacy/
+│   ├── configs.py              # Legacy proxy config
+│   ├── ctl.py                  # Legacy proxy controller
+│   └── proxy.py                # Legacy proxy (A4F, OpenAI-compatible)
 ├── config/
 │   ├── config_manager.py       # JSON config manager (~/.clp/*.json)
 │   └── cached_config_manager.py
@@ -199,6 +203,93 @@ Open the Web UI → **Model Settings (Codex)** to choose per-model defaults for 
 - **Reasoning Summary** (`off`, `auto`, or `detailed`). `auto` is currently the default for GPT‑5 series and yields the best summary available for the model.
 
 The proxy persists these choices in `~/.clp/data/system.json` and injects them automatically when clients omit the corresponding fields. Unsupported combinations are sanitized (for example, GPT‑5‑Codex never sends `reasoning.effort=minimal`).
+
+## Legacy Proxy Service (port 3212)
+
+The Legacy proxy (`src/legacy/proxy.py`) is an OpenAI-compatible proxy that forwards requests to any OpenAI-compatible endpoint. It's designed for agents like Droid CLI and Roo Code that need OpenAI-style chat completion APIs.
+
+### Key Features
+- **Tool Calling Support**: Full streaming support for function calling with proper SSE transformation
+- **Request Normalization**: Converts between different API formats (Responses → OpenAI-compatible)
+- **RPM Rate Limiting**: Conservative per-minute rate limiting to avoid overwhelming upstream APIs (default: `None` for unlimited local requests, but respects upstream limits)
+- **SSE Streaming**: Transforms non-streaming responses to SSE format for clients that expect streaming
+
+### Starting the Legacy Proxy
+```bash
+# Via CLI
+uv run -p .venv clp start
+
+# Or directly
+.venv/bin/python -m src.legacy.proxy
+```
+
+The proxy listens on `http://127.0.0.1:3212`.
+
+### Configuration
+Create or edit `~/.clp/legacy.json`:
+```json
+{
+  "default": {
+    "base_url": "https://your-openai-compatible-api.com/v1",
+    "auth_token": "YOUR_API_KEY",
+    "active": true
+  }
+}
+```
+
+### Tool Calling (Function Calling)
+The legacy proxy fully supports tool calling for models that have the `function_calling` capability:
+
+**Request:**
+```bash
+curl -X POST http://127.0.0.1:3212/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "your-model-id",
+    "messages": [{"role": "user", "content": "Read this file"}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read a file",
+          "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}}
+        }
+      }
+    ],
+    "stream": true
+  }'
+```
+
+**Response (SSE):**
+```
+data: {"id": "chatcmpl-...", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"id": "toolu_...", "type": "function", "function": {"name": "Read", "arguments": "{...}"}}]}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-...", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}], "usage": {...}}
+
+data: [DONE]
+```
+
+**How it works:**
+1. Client sends `stream=true` + tools to the proxy
+2. Proxy detects tools and forces `stream=false` to upstream (many OpenAI-compatible APIs don't support streaming + tools simultaneously)
+3. Proxy transforms the non-streaming JSON response into SSE format for the client
+4. Tool calls are preserved in the SSE delta field, appearing as if they came from a streaming response
+
+### Known Issues
+See `docs/OPUS_DROID_ISSUE.md` for documented issues with specific model/client combinations.
+
+### RPM Rate Limiting
+The legacy proxy has a conservative default RPM limit to avoid overwhelming upstream APIs:
+- **Default**: `None` (no limit on local requests)
+- **Per-upstream config**: Can be set via the `rpm_limit` field in `~/.clp/legacy.json`
+- **Behavior**: When limit is reached, requests queue with exponential backoff
+
+If you hit rate limits, either:
+1. Increase the `rpm_limit` in config
+2. Contact the upstream provider (A4F) for higher limits
+3. Use multiple API keys with load balancing
 
 ## Factory/Droid BYOK (works with the proxy)
 

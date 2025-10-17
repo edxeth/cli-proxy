@@ -20,6 +20,11 @@ class ConfigManager:
         """Ensure the config file exists; return True if newly created."""
         self._ensure_config_dir()
         if not self.config_file.exists():
+            if self.service_name == 'legacy':
+                legacy_alias = self.config_dir / 'a4f.json'
+                if legacy_alias.exists():
+                    legacy_alias.rename(self.config_file)
+                    return False
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
             return True
@@ -62,6 +67,19 @@ class ConfigManager:
                     except (TypeError, ValueError):
                         weight_value = 0
                     configs[config_name]['weight'] = weight_value
+
+                    # Parse optional RPM limit (requests per minute)
+                    rpm_value = config_data.get('rpm_limit')
+                    if rpm_value is None:
+                        rpm_value = config_data.get('requests_per_minute')
+                    try:
+                        rpm_value = float(rpm_value) if rpm_value is not None else None
+                        if rpm_value is not None and rpm_value <= 0:
+                            rpm_value = None
+                    except (TypeError, ValueError):
+                        rpm_value = None
+                    if rpm_value is not None:
+                        configs[config_name]['rpm_limit'] = rpm_value
                     
                     # Mark the active config if specified
                     if config_data.get('active', False):
@@ -127,6 +145,10 @@ class ConfigManager:
             # Persist optional weight values
             if 'weight' in config:
                 data[name]['weight'] = config['weight']
+
+            # Persist optional RPM limit
+            if 'rpm_limit' in config and config['rpm_limit'] is not None:
+                data[name]['rpm_limit'] = config['rpm_limit']
         
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
@@ -145,3 +167,4 @@ class ConfigManager:
 # Global instances
 claude_config_manager = ConfigManager('claude')
 codex_config_manager = ConfigManager('codex')
+legacy_config_manager = ConfigManager('legacy')

@@ -24,6 +24,7 @@ from ..utils.usage_parser import (
 )
 from ..utils.platform_helper import create_detached_process
 from .realtime_hub import RealTimeRequestHub
+from .rate_limiter import RequestRateLimiter
 
 class BaseProxyService(ABC):
     """Base proxy service implementation."""
@@ -77,6 +78,9 @@ class BaseProxyService(ABC):
 
         # Real-time event hub
         self.realtime_hub = RealTimeRequestHub(service_name)
+
+        # Shared request rate limiter
+        self._rate_limiter = RequestRateLimiter()
 
         # FastAPI application wiring
         self.app = FastAPI()
@@ -158,6 +162,7 @@ class BaseProxyService(ABC):
         total_response_bytes: Optional[int] = None,
         target_url: Optional[str] = None,
         response_headers: Optional[Dict] = None,
+        extra_fields: Optional[Dict[str, Any]] = None,
     ):
         """Record a request log entry to the JSONL file (offloaded to a thread)."""
 
@@ -196,6 +201,10 @@ class BaseProxyService(ABC):
 
                 if response_headers:
                     log_entry['response_headers'] = response_headers
+
+                if extra_fields:
+                    for key, value in extra_fields.items():
+                        log_entry[key] = value
 
                 if response_truncated:
                     log_entry['response_truncated'] = True
@@ -363,11 +372,13 @@ class BaseProxyService(ABC):
             'mode': 'default',
             'modelMappings': {
                 'claude': [],
-                'codex': []
+                'codex': [],
+                'legacy': []
             },
             'configMappings': {
                 'claude': [],
-                'codex': []
+                'codex': [],
+                'legacy': []
             }
         }
 
@@ -382,6 +393,11 @@ class BaseProxyService(ABC):
                     'excludedConfigs': []
                 },
                 'codex': {
+                    'failureThreshold': 3,
+                    'currentFailures': {},
+                    'excludedConfigs': []
+                },
+                'legacy': {
                     'failureThreshold': 3,
                     'currentFailures': {},
                     'excludedConfigs': []
@@ -414,6 +430,7 @@ class BaseProxyService(ABC):
 
         self._ensure_lb_service_section(data, 'claude')
         self._ensure_lb_service_section(data, 'codex')
+        self._ensure_lb_service_section(data, 'legacy')
         return data
 
     def _ensure_lb_config_current(self):
@@ -662,6 +679,41 @@ class BaseProxyService(ABC):
 
         return target_url, headers, modified_body, active_config_name
 
+    def default_rpm_limit(self) -> Optional[float]:
+        """Return the default RPM limit when configs omit an explicit value."""
+        return None
+
+    def _resolve_rpm_limit(self, config_data: Optional[Dict[str, Any]]) -> Optional[float]:
+        """Determine which RPM limit should apply to the current request."""
+        rpm = None
+        if config_data and isinstance(config_data, dict):
+            rpm = config_data.get('rpm_limit')
+        if rpm is None:
+            rpm = self.default_rpm_limit()
+        try:
+            rpm_value = float(rpm) if rpm is not None else None
+        except (TypeError, ValueError):
+            rpm_value = None
+        if rpm_value is not None and rpm_value <= 0:
+            return None
+        return rpm_value
+
+    async def _apply_rate_limit(self, config_name: Optional[str]) -> None:
+        """Apply request throttling before forwarding upstream."""
+        if not config_name:
+            key = self.service_name
+            config_data = {}
+        else:
+            configs_snapshot = self.config_manager.configs
+            config_data = configs_snapshot.get(config_name) or {}
+            key = config_name
+
+        rpm_limit = self._resolve_rpm_limit(config_data)
+        if rpm_limit is None:
+            return
+
+        await self._rate_limiter.acquire(key, rpm_limit)
+
     @abstractmethod
     def test_endpoint(self, model: str, base_url: str, auth_token: str = None, api_key: str = None, extra_params: dict = None) -> dict:
         """Probe an upstream endpoint to confirm connectivity.
@@ -726,6 +778,9 @@ class BaseProxyService(ABC):
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
+        # Enforce configured rate limits before further processing
+        await self._apply_rate_limit(active_config_name)
+
         # Apply request filters off the event loop
         filtered_body = await asyncio.to_thread(self.apply_request_filter, target_body)
 
@@ -752,6 +807,7 @@ class BaseProxyService(ABC):
             response = await self.client.send(request_out, stream=is_stream)
 
             status_code = response.status_code
+            upstream_status_code = status_code
             chunk_transformer = self.get_response_chunk_transformer(
                 request=request,
                 path=path,
@@ -759,6 +815,12 @@ class BaseProxyService(ABC):
                 target_body=target_body,
             )
             lb_result_recorded = False
+
+            if chunk_transformer and getattr(chunk_transformer, 'override_status_code', None):
+                try:
+                    status_code = int(chunk_transformer.override_status_code)
+                except (TypeError, ValueError):
+                    status_code = response.status_code
 
             if not (200 <= status_code < 300):
                 await asyncio.to_thread(self._record_lb_result, active_config_name, status_code)
@@ -778,6 +840,30 @@ class BaseProxyService(ABC):
                     # Include header in both logs and response
                     response_headers[k] = v
                     response_headers_for_log[k] = v
+
+            if chunk_transformer and getattr(chunk_transformer, 'strip_content_length', False):
+                for header_mapping in (response_headers, response_headers_for_log):
+                    to_remove = [key for key in list(header_mapping.keys()) if key.lower() == 'content-length']
+                    for header_key in to_remove:
+                        header_mapping.pop(header_key, None)
+
+            if chunk_transformer:
+                override_headers = getattr(chunk_transformer, 'override_response_headers', None)
+                if isinstance(override_headers, dict):
+                    for header_name, header_value in override_headers.items():
+                        existing_key = next((k for k in list(response_headers.keys()) if k.lower() == header_name.lower()), None)
+                        existing_log_key = next((k for k in list(response_headers_for_log.keys()) if k.lower() == header_name.lower()), None)
+
+                        if existing_key is not None:
+                            response_headers.pop(existing_key, None)
+                        if existing_log_key is not None:
+                            response_headers_for_log.pop(existing_log_key, None)
+
+                        if header_value is None:
+                            continue
+
+                        response_headers[header_name] = header_value
+                        response_headers_for_log[header_name] = header_value
 
             collected = bytearray()
             total_response_bytes = 0
@@ -877,6 +963,7 @@ class BaseProxyService(ABC):
                         total_response_bytes=total_response_bytes,
                         target_url=target_url,
                         response_headers=response_headers_for_log,
+                        extra_fields={'upstream_status_code': upstream_status_code},
                     )
 
                     if not lb_result_recorded:

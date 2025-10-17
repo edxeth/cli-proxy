@@ -3,6 +3,7 @@ import argparse
 import time
 from src.codex import ctl as codex
 from src.claude import ctl as claude
+from src.legacy import ctl as legacy
 from src.ui import ctl as ui
 
 def print_status():
@@ -20,6 +21,21 @@ def print_status():
     config_text = f" - Active config: {claude_config}" if claude_config else " - No active config"
 
     print(f"  Port: 3210")
+    print(f"  Status: {status_text}{pid_text}")
+    print(f"  Config: {config_text}")
+    print()
+
+    # Legacy service status
+    print("Legacy proxy:")
+    legacy_running = legacy.is_running()
+    legacy_pid = legacy.get_pid() if legacy_running else None
+    legacy_config = legacy.legacy_config_manager.active_config
+
+    status_text = "Running" if legacy_running else "Stopped"
+    pid_text = f" (PID: {legacy_pid})" if legacy_pid else ""
+    config_text = f" - Active config: {legacy_config}" if legacy_config else " - No active config"
+
+    print(f"  Port: 3212")
     print(f"  Status: {status_text}{pid_text}")
     print(f"  Config: {config_text}")
     print()
@@ -74,24 +90,24 @@ def main():
     start = subparsers.add_parser(
         'start', 
         help='Start all proxy services',
-        description='Start the codex, claude, and ui services',
+        description='Start the codex, claude, legacy, and ui services',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Example:
-  clp start                     Start all services (codex:3211, claude:3210, ui:3300)"""
+  clp start                     Start all services (claude:3210, codex:3211, legacy:3212, ui:3300)"""
     )
 
     # stop command
     stop = subparsers.add_parser(
         'stop', 
         help='Stop all proxy services',
-        description='Stop the codex, claude, and ui services'
+        description='Stop the codex, claude, legacy, and ui services'
     )
 
     # restart command
     restart = subparsers.add_parser(
         'restart', 
         help='Restart all proxy services',
-        description='Restart the codex, claude, and ui services',
+        description='Restart the codex, claude, legacy, and ui services',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Example:
   clp restart                   Restart all services"""
@@ -107,8 +123,8 @@ def main():
   clp active claude prod        Activate the Claude prod config
   clp active codex dev          Activate the Codex dev config"""
     )
-    active_parser.add_argument('service', choices=['codex', 'claude'], 
-                              help='Service type', metavar='{codex,claude}')
+    active_parser.add_argument('service', choices=['codex', 'claude', 'legacy'], 
+                              help='Service type', metavar='{codex,claude,legacy}')
     active_parser.add_argument('config_name', help='Name of the config to activate')
 
     # list command
@@ -117,8 +133,8 @@ def main():
         help='List all configs',
         description='Show every available config for the selected service'
     )
-    lists.add_argument('service', choices=['codex', 'claude'], 
-                      help='Service type', metavar='{codex,claude}')
+    lists.add_argument('service', choices=['codex', 'claude', 'legacy'], 
+                      help='Service type', metavar='{codex,claude,legacy}')
 
     # status command
     status_parser = subparsers.add_parser(
@@ -144,6 +160,7 @@ def main():
         print("Starting all services...")
         claude.start()
         codex.start()
+        legacy.start()
         ui.start()
 
         # Wait for the services to start
@@ -153,21 +170,27 @@ def main():
     elif args.command == 'stop':
         claude.stop()
         codex.stop()
+        legacy.stop()
         ui.stop()
     elif args.command == 'restart':
         claude.restart()
         codex.restart()
+        legacy.restart()
         ui.restart()
     elif args.command == 'active':
         if args.service == 'codex':
             codex.set_active_config(args.config_name)
         elif args.service == 'claude':
             claude.set_active_config(args.config_name)
+        elif args.service == 'legacy':
+            legacy.set_active_config(args.config_name)
     elif args.command == 'list':
         if args.service == 'codex':
             codex.list_configs()
         elif args.service == 'claude':
             claude.list_configs()
+        elif args.service == 'legacy':
+            legacy.list_configs()
     elif args.command == 'status':
         print_status()
     elif args.command == 'ui':

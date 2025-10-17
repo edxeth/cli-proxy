@@ -4,6 +4,7 @@ const { ElMessage, ElMessageBox } = ElementPlus;
 
 const app = createApp({
     setup() {
+        const SERVICE_NAMES = ['claude', 'legacy', 'codex'];
         // Reactive state
         const loading = ref(false);
         const logsLoading = ref(false);
@@ -15,6 +16,11 @@ const app = createApp({
         // Service status state
         const services = reactive({
             claude: {
+                running: false,
+                pid: null,
+                config: ''
+            },
+            legacy: {
                 running: false,
                 pid: null,
                 config: ''
@@ -39,9 +45,11 @@ const app = createApp({
         
         // Configuration options
         const claudeConfigs = ref([]);
+        const legacyConfigs = ref([]);
         const codexConfigs = ref([]);
         const configMetadata = reactive({
             claude: {},
+            legacy: {},
             codex: {}
         });
         
@@ -59,6 +67,7 @@ const app = createApp({
         // Configuration content
         const configContents = reactive({
             claude: '',
+            legacy: '',
             codex: ''
         });
         const filterContent = ref('');
@@ -67,6 +76,7 @@ const app = createApp({
         // Friendly form configuration data
         const friendlyConfigs = reactive({
             claude: [],  // [{ name, baseUrl, authType, authValue, active }]
+            legacy: [],
             codex: []
         });
 
@@ -76,6 +86,7 @@ const app = createApp({
         // Data used by merged configuration mode
         const mergedConfigs = reactive({
             claude: [],  // Each entry is a group
+            legacy: [],
             codex: []
         });
 
@@ -86,6 +97,7 @@ const app = createApp({
             baseUrl: 'https://',
             weight: 0,
             authType: 'auth_token',
+            rpmLimit: null,
             entries: []  // [{ name, authValue, active }]
         });
         const mergedDialogMode = ref('add');
@@ -94,6 +106,7 @@ const app = createApp({
         // New site edit state
         const editingNewSite = reactive({
             claude: false,
+            legacy: false,
             codex: false
         });
 
@@ -106,6 +119,15 @@ const app = createApp({
                 authValue: '',
                 active: false,
                 weight: 0
+            },
+            legacy: {
+                name: '',
+                baseUrl: 'https://',
+                authType: 'auth_token',
+                authValue: '',
+                active: false,
+                weight: 0,
+                rpmLimit: 0
             },
             codex: {
                 name: '',
@@ -141,6 +163,7 @@ const app = createApp({
         // Result of testing newly added sites
         const newSiteTestResult = reactive({
             claude: null,
+            legacy: null,
             codex: null
         });
 
@@ -211,7 +234,7 @@ const app = createApp({
         const realtimeRequests = ref([]);
         const realtimeDetailVisible = ref(false);
         const selectedRealtimeRequest = ref(null);
-        const connectionStatus = reactive({ claude: false, codex: false });
+        const connectionStatus = reactive({ claude: false, codex: false, legacy: false });
         const realtimeManager = ref(null);
         const maxRealtimeRequests = 20;
 
@@ -225,11 +248,13 @@ const app = createApp({
             mode: 'default',
             modelMappings: {
                 claude: [],  // [{ source: 'sonnet4', target: 'opus4' }]
-                codex: []
+                codex: [],
+                legacy: []
             },
             configMappings: {
                 claude: [],  // [{ model: 'sonnet4', config: 'config_a' }]
-                codex: []
+                codex: [],
+                legacy: []
             }
         });
         const routingConfigSaving = ref(false);
@@ -243,6 +268,11 @@ const app = createApp({
                     currentFailures: {},
                     excludedConfigs: []
                 },
+                legacy: {
+                    failureThreshold: 3,
+                    currentFailures: {},
+                    excludedConfigs: []
+                },
                 codex: {
                     failureThreshold: 3,
                     currentFailures: {},
@@ -252,13 +282,14 @@ const app = createApp({
         });
         const loadbalanceSaving = ref(false);
         const loadbalanceLoading = ref(false);
-        const resettingFailures = reactive({ claude: false, codex: false });
+        const resettingFailures = reactive({ claude: false, codex: false, legacy: false });
         const isLoadbalanceWeightMode = computed(() => loadbalanceConfig.mode === 'weight-based');
         const loadbalanceDisabledNotice = computed(() => isLoadbalanceWeightMode.value ? 'Load balancing in effect' : '');
         const PINNED_WEIGHT_START = 1000;
         const pinningState = reactive({
             claude: { loading: false, target: '' },
-            codex: { loading: false, target: '' }
+            codex: { loading: false, target: '' },
+            legacy: { loading: false, target: '' }
         });
 
         // Responsive layout controls
@@ -507,6 +538,12 @@ const app = createApp({
                 return [
                     { label: 'gpt-5-codex', value: 'gpt-5-codex' },
                     { label: 'gpt-5', value: 'gpt-5' }
+                ];
+            } else if (service === 'legacy') {
+                return [
+                    { label: 'provider-2/gpt-5', value: 'provider-2/gpt-5' },
+                    { label: 'provider-7/claude-sonnet-4-5-20250929', value: 'provider-7/claude-sonnet-4-5-20250929' },
+                    { label: 'provider-7/claude-opus-4-1-20250805', value: 'provider-7/claude-opus-4-1-20250805' }
                 ];
             }
             return [];
@@ -897,7 +934,7 @@ const app = createApp({
                     routingMode.value = data.config.mode || 'default';
 
                     // Backwards compatibility: ensure mappings without source_type default to model
-                    ['claude', 'codex'].forEach(service => {
+                    SERVICE_NAMES.forEach(service => {
                         if (routingConfig.modelMappings[service]) {
                             routingConfig.modelMappings[service].forEach(mapping => {
                                 if (!mapping.source_type) {
@@ -932,6 +969,11 @@ const app = createApp({
                         currentFailures: {},
                         excludedConfigs: []
                     },
+                    legacy: {
+                        failureThreshold: 3,
+                        currentFailures: {},
+                        excludedConfigs: []
+                    },
                     codex: {
                         failureThreshold: 3,
                         currentFailures: {},
@@ -940,7 +982,7 @@ const app = createApp({
                 }
             };
 
-            ['claude', 'codex'].forEach(service => {
+            SERVICE_NAMES.forEach(service => {
                 const section = payload.services?.[service] || {};
                 const threshold = Number(section.failureThreshold ?? section.failover_count ?? 3);
                 normalized.services[service].failureThreshold = Number.isFinite(threshold) && threshold > 0 ? threshold : 3;
@@ -962,7 +1004,7 @@ const app = createApp({
 
         const applyLoadbalanceConfig = (normalized) => {
             loadbalanceConfig.mode = normalized.mode;
-            ['claude', 'codex'].forEach(service => {
+            SERVICE_NAMES.forEach(service => {
                 const svc = normalized.services[service];
                 loadbalanceConfig.services[service].failureThreshold = svc.failureThreshold;
                 loadbalanceConfig.services[service].currentFailures = Object.assign({}, svc.currentFailures);
@@ -988,12 +1030,14 @@ const app = createApp({
                 };
             };
 
+            const servicesPayload = {};
+            SERVICE_NAMES.forEach(service => {
+                servicesPayload[service] = buildServiceSection(service);
+            });
+
             return {
                 mode: loadbalanceConfig.mode,
-                services: {
-                    claude: buildServiceSection('claude'),
-                    codex: buildServiceSection('codex')
-                }
+                services: servicesPayload
             };
         };
 
@@ -1051,8 +1095,8 @@ const app = createApp({
         };
 
         const weightedTargets = computed(() => {
-            const result = { claude: [], codex: [] };
-            ['claude', 'codex'].forEach(service => {
+            const result = {};
+            SERVICE_NAMES.forEach(service => {
                 const metadata = configMetadata[service] || {};
                 const threshold = loadbalanceConfig.services[service]?.failureThreshold || 3;
                 const failures = loadbalanceConfig.services[service]?.currentFailures || {};
@@ -1227,6 +1271,9 @@ const app = createApp({
             if (data.services?.claude) {
                 Object.assign(services.claude, data.services.claude);
             }
+            if (data.services?.legacy) {
+                Object.assign(services.legacy, data.services.legacy);
+            }
             if (data.services?.codex) {
                 Object.assign(services.codex, data.services.codex);
             }
@@ -1251,7 +1298,7 @@ const app = createApp({
                     mergeMetricsInto(totalMetrics, adjusted.displayMetrics || adjusted.metrics);
                 });
 
-                ['claude', 'codex'].forEach(service => {
+                SERVICE_NAMES.forEach(service => {
                     if (!perService[service]) {
                         perService[service] = adjustUsageBlockForService(service, {});
                     }
@@ -1293,45 +1340,41 @@ const app = createApp({
         // Load configuration options
         const loadConfigOptions = async () => {
             try {
-                // Load Claude configuration options
-                const claudeData = await fetchWithErrorHandling('/api/config/claude');
-                if (claudeData.content) {
-                    const configs = JSON.parse(claudeData.content);
-                    const entries = Object.entries(configs).filter(([key, value]) => key && key !== 'undefined' && value !== undefined);
-                    claudeConfigs.value = entries.map(([key]) => key);
-                    const metadata = {};
-                    entries.forEach(([key, value]) => {
-                        const weightValue = Number(value?.weight ?? 0);
-                        metadata[key] = {
-                            weight: Number.isFinite(weightValue) ? weightValue : 0,
-                            active: !!value?.active
-                        };
-                    });
-                    configMetadata.claude = metadata;
-                } else {
-                    claudeConfigs.value = [];
-                    configMetadata.claude = {};
-                }
-                
-                // Load Codex configuration options
-                const codexData = await fetchWithErrorHandling('/api/config/codex');
-                if (codexData.content) {
-                    const configs = JSON.parse(codexData.content);
-                    const entries = Object.entries(configs).filter(([key, value]) => key && key !== 'undefined' && value !== undefined);
-                    codexConfigs.value = entries.map(([key]) => key);
-                    const metadata = {};
-                    entries.forEach(([key, value]) => {
-                        const weightValue = Number(value?.weight ?? 0);
-                        metadata[key] = {
-                            weight: Number.isFinite(weightValue) ? weightValue : 0,
-                            active: !!value?.active
-                        };
-                    });
-                    configMetadata.codex = metadata;
-                } else {
-                    codexConfigs.value = [];
-                    configMetadata.codex = {};
-                }
+                const configRefs = {
+                    claude: claudeConfigs,
+                    legacy: legacyConfigs,
+                    codex: codexConfigs,
+                };
+
+                await Promise.all(SERVICE_NAMES.map(async (service) => {
+                    const response = await fetchWithErrorHandling(`/api/config/${service}`);
+                    const targetRef = configRefs[service];
+                    if (!targetRef) {
+                        return;
+                    }
+
+                    if (response.content) {
+                        const configs = JSON.parse(response.content);
+                        const entries = Object.entries(configs).filter(
+                            ([key, value]) => key && key !== 'undefined' && value !== undefined
+                        );
+                        targetRef.value = entries.map(([key]) => key);
+                        const metadata = {};
+                        entries.forEach(([key, value]) => {
+                            const weightValue = Number(value?.weight ?? 0);
+                            const rpmValue = Number(value?.rpm_limit ?? value?.requests_per_minute ?? 0);
+                            metadata[key] = {
+                                weight: Number.isFinite(weightValue) ? weightValue : 0,
+                                active: !!value?.active,
+                                rpmLimit: Number.isFinite(rpmValue) && rpmValue > 0 ? rpmValue : null,
+                            };
+                        });
+                        configMetadata[service] = metadata;
+                    } else {
+                        targetRef.value = [];
+                        configMetadata[service] = {};
+                    }
+                }));
             } catch (error) {
                 console.error('Failed to load configuration options:', error);
             }
@@ -1418,31 +1461,25 @@ const app = createApp({
         
         const loadConfigs = async () => {
             try {
-                // Load Claude configuration
-                const claudeData = await fetchWithErrorHandling('/api/config/claude');
-                const claudeContent = claudeData?.content ?? '{}';
-                configContents.claude = claudeContent.trim() ? claudeContent : '{}';
-                syncJsonToForm('claude');
-
-                // Load Codex configuration
-                const codexData = await fetchWithErrorHandling('/api/config/codex');
-                const codexContent = codexData?.content ?? '{}';
-                configContents.codex = codexContent.trim() ? codexContent : '{}';
-                syncJsonToForm('codex');
+                await Promise.all(SERVICE_NAMES.map(async (service) => {
+                    const data = await fetchWithErrorHandling(`/api/config/${service}`);
+                    const content = data?.content ?? '{}';
+                    const normalized = content.trim() ? content : '{}';
+                    configContents[service] = normalized;
+                    syncJsonToForm(service);
+                }));
             } catch (error) {
                 const errorMsg = '// Load failed: ' + error.message;
-                configContents.claude = errorMsg;
-                configContents.codex = errorMsg;
-                // Clear friendly form values when loading fails
-                friendlyConfigs.claude = [];
-                friendlyConfigs.codex = [];
+                SERVICE_NAMES.forEach(service => {
+                    configContents[service] = errorMsg;
+                    friendlyConfigs[service] = [];
+                });
             }
         };
         
         // Friendly form configuration helpers
-        const startAddingSite = (service) => {
-            editingNewSite[service] = true;
-            newSiteData[service] = {
+        const buildDefaultSite = (service) => {
+            const base = {
                 name: '',
                 baseUrl: 'https://',
                 authType: 'auth_token',
@@ -1450,6 +1487,15 @@ const app = createApp({
                 active: false,
                 weight: 0
             };
+            if (service === 'legacy') {
+                base.rpmLimit = 0;
+            }
+            return base;
+        };
+
+        const startAddingSite = (service) => {
+            editingNewSite[service] = true;
+            newSiteData[service] = buildDefaultSite(service);
             // Auto-focus the site name input
             nextTick(() => {
                 const input = document.querySelector('.new-site-name-input input');
@@ -1484,14 +1530,7 @@ const app = createApp({
 
         const cancelAddSite = (service) => {
             editingNewSite[service] = false;
-            newSiteData[service] = {
-                name: '',
-                baseUrl: 'https://',
-                authType: 'auth_token',
-                authValue: '',
-                active: false,
-                weight: 0
-            };
+            newSiteData[service] = buildDefaultSite(service);
         };
 
         const saveInteractiveConfig = async (service) => {
@@ -1569,6 +1608,13 @@ const app = createApp({
                         const weightValue = Number(site.weight ?? 0);
                         config.weight = Number.isFinite(weightValue) ? weightValue : 0;
 
+                        if (service === 'legacy') {
+                            const rpmValue = Number(site.rpmLimit ?? configMetadata.legacy?.[site.name]?.rpmLimit ?? 0);
+                            if (Number.isFinite(rpmValue) && rpmValue > 0) {
+                                config.rpm_limit = rpmValue;
+                            }
+                        }
+
                         jsonObj[site.name.trim()] = config;
                     }
                 });
@@ -1618,6 +1664,12 @@ const app = createApp({
                             weightValue = 0;
                         }
 
+                        let rpmLimit = null;
+                        if (service === 'legacy') {
+                            const rawRpm = Number(config.rpm_limit ?? config.requests_per_minute ?? 0);
+                            rpmLimit = Number.isFinite(rawRpm) && rawRpm > 0 ? rawRpm : 0;
+                        }
+
                         sites.push({
                             name: siteName,
                             baseUrl: config.base_url || '',
@@ -1625,6 +1677,7 @@ const app = createApp({
                             authValue: authValue,
                             active: config.active || false,
                             weight: weightValue,
+                        rpmLimit: rpmLimit,
                             __mergedId: generateEntryId()
                         });
                     }
@@ -1746,6 +1799,9 @@ const app = createApp({
             const inconsistent = [];
             const standardWeight = group.weight;
             const standardAuthType = group.authType;
+            const standardRpm = service === 'legacy'
+                ? (Number.isFinite(group.rpmLimit) && group.rpmLimit > 0 ? group.rpmLimit : 0)
+                : null;
 
             group.entries.forEach(entry => {
                 // Locate the friendly entry and align it with the group values
@@ -1763,6 +1819,15 @@ const app = createApp({
                             inconsistent.push('auth type');
                         }
                         friendlyItem.authType = standardAuthType;
+                    }
+                    if (service === 'legacy') {
+                        const friendlyRpm = Number.isFinite(friendlyItem.rpmLimit) ? friendlyItem.rpmLimit : 0;
+                        if (friendlyRpm !== standardRpm) {
+                            if (!inconsistent.includes('rpm limit')) {
+                                inconsistent.push('rpm limit');
+                            }
+                            friendlyItem.rpmLimit = standardRpm;
+                        }
                     }
                 }
             });
@@ -1804,11 +1869,22 @@ const app = createApp({
                         baseUrl: key,
                         weight: site.weight || 0,
                         authType: site.authType || 'auth_token',
+                        rpmLimit: service === 'legacy'
+                            ? (Number.isFinite(site.rpmLimit) && site.rpmLimit > 0 ? site.rpmLimit : 0)
+                            : null,
                         entries: []
                     });
                 }
 
                 const group = grouped.get(key);
+                if (service === 'legacy') {
+                    const candidateRpm = Number.isFinite(site.rpmLimit) && site.rpmLimit > 0 ? site.rpmLimit : 0;
+                    if (candidateRpm > 0) {
+                        group.rpmLimit = candidateRpm;
+                    } else if (!Number.isFinite(group.rpmLimit)) {
+                        group.rpmLimit = 0;
+                    }
+                }
                 const siteId = ensureEntryId(site);
 
                 group.entries.push({
@@ -1856,6 +1932,9 @@ const app = createApp({
                         authType: group.authType,
                         authValue: entry.authValue,
                         active: entry.active,
+                        rpmLimit: service === 'legacy'
+                            ? (Number.isFinite(group.rpmLimit) && group.rpmLimit > 0 ? group.rpmLimit : 0)
+                            : undefined,
                         __mergedId: siteId
                     });
                 });
@@ -1878,6 +1957,18 @@ const app = createApp({
                 return;
             }
 
+            if (service === 'legacy') {
+                if (group.rpmLimit === '' || group.rpmLimit === undefined) {
+                    group.rpmLimit = 0;
+                }
+                const rpmValue = Number(group.rpmLimit);
+                if (!Number.isFinite(rpmValue) || rpmValue < 0) {
+                    ElMessage.warning('RPM limit must be zero (unlimited) or a positive number');
+                    return;
+                }
+                group.rpmLimit = rpmValue;
+            }
+
             // Update every matching friendly configuration entry
             group.entries.forEach(entry => {
                 const friendlyItem = findFriendlyBySiteId(service, entry.siteId);
@@ -1886,6 +1977,10 @@ const app = createApp({
                     friendlyItem.baseUrl = group.baseUrl;
                     friendlyItem.weight = group.weight;
                     friendlyItem.authType = group.authType;
+                    if (service === 'legacy') {
+                        const rpmValue = Number(group.rpmLimit);
+                        friendlyItem.rpmLimit = Number.isFinite(rpmValue) ? rpmValue : 0;
+                    }
                 }
             });
 
@@ -2065,6 +2160,9 @@ const app = createApp({
                 authType: group.authType,
                 authValue: '',
                 active: false,
+                rpmLimit: service === 'legacy'
+                    ? (Number.isFinite(group.rpmLimit) ? group.rpmLimit : 0)
+                    : undefined,
                 __mergedId: newSiteId
             });
             sortFriendlyList(service);
@@ -2199,6 +2297,7 @@ const app = createApp({
             mergedDialogDraft.baseUrl = 'https://';
             mergedDialogDraft.weight = 0;
             mergedDialogDraft.authType = 'auth_token';
+            mergedDialogDraft.rpmLimit = service === 'legacy' ? 0 : null;
             mergedDialogDraft.entries = [
                 { name: '', authValue: '', active: false, siteId: null, lastSyncedName: '' }
             ];
@@ -2222,6 +2321,9 @@ const app = createApp({
             mergedDialogDraft.baseUrl = group.baseUrl;
             mergedDialogDraft.weight = group.weight;
             mergedDialogDraft.authType = group.authType;
+            mergedDialogDraft.rpmLimit = service === 'legacy'
+                ? (Number.isFinite(group.rpmLimit) ? group.rpmLimit : 0)
+                : null;
             mergedDialogDraft.entries = group.entries.length > 0
                 ? group.entries.map(entry => ({
                     name: entry.name,
@@ -2291,6 +2393,20 @@ const app = createApp({
             if (!Number.isFinite(draft.weight) || draft.weight < 0) {
                 ElMessage.error('Weight must be a non-negative integer');
                 return;
+            }
+
+            if (service === 'legacy') {
+                if (draft.rpmLimit === '' || draft.rpmLimit === undefined || draft.rpmLimit === null) {
+                    draft.rpmLimit = 0;
+                }
+                const rpmValue = Number(draft.rpmLimit);
+                if (!Number.isFinite(rpmValue) || rpmValue < 0) {
+                    ElMessage.error('RPM limit must be zero (unlimited) or a positive number');
+                    return;
+                }
+                draft.rpmLimit = rpmValue;
+            } else {
+                draft.rpmLimit = null;
             }
 
             if (!Array.isArray(draft.entries) || draft.entries.length === 0) {
@@ -2382,6 +2498,7 @@ const app = createApp({
                         authType: draft.authType,
                         authValue: entry.authValue,
                         active: entry.active,
+                        rpmLimit: service === 'legacy' ? draft.rpmLimit : undefined,
                         __mergedId: siteId
                     };
                 });
@@ -2425,22 +2542,26 @@ const app = createApp({
                             friendlyItem.authType = draft.authType;
                             friendlyItem.authValue = entry.authValue;
                             friendlyItem.active = entry.active;
+                            if (service === 'legacy') {
+                                friendlyItem.rpmLimit = draft.rpmLimit;
+                            }
                             friendlyItem.__mergedId = entry.siteId;
                         }
                     } else {
                         const newSiteId = generateEntryId();
                         entry.siteId = newSiteId;
                         entry.lastSyncedName = entry.name;
-                            friendlyConfigs[service].push({
-                                name: entry.name,
-                                baseUrl: draft.baseUrl,
-                                weight: draft.weight,
-                                authType: draft.authType,
-                                authValue: entry.authValue,
-                                active: entry.active,
-                                __mergedId: newSiteId
-                            });
-                        }
+                        friendlyConfigs[service].push({
+                            name: entry.name,
+                            baseUrl: draft.baseUrl,
+                            weight: draft.weight,
+                            authType: draft.authType,
+                            authValue: entry.authValue,
+                            active: entry.active,
+                            rpmLimit: service === 'legacy' ? draft.rpmLimit : undefined,
+                            __mergedId: newSiteId
+                        });
+                    }
                 });
 
                 sortFriendlyList(service);
@@ -3346,6 +3467,16 @@ const app = createApp({
             });
         });
 
+        // Watch Legacy configuration JSON
+        watch(() => configContents.legacy, (newValue) => {
+            nextTick(() => {
+                syncJsonToForm('legacy');
+                if (configEditMode.value === 'merged') {
+                    buildMergedFromFriendly('legacy');
+                }
+            });
+        });
+
         // Watch Codex configuration JSON
         watch(() => configContents.codex, (newValue) => {
             // Delay execution to avoid feedback loops
@@ -3603,6 +3734,7 @@ const app = createApp({
             logs,
             allLogs,
             claudeConfigs,
+            legacyConfigs,
             codexConfigs,
             configDrawerVisible,
             filterDrawerVisible,

@@ -14,7 +14,8 @@ class RealTimeManager {
         // Service configuration
         this.services = [
             { name: 'claude', port: 3210 },
-            { name: 'codex', port: 3211 }
+            { name: 'codex', port: 3211 },
+            { name: 'legacy', port: 3212 }
         ];
 
         // Connection status tracking

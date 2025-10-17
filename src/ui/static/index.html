@@ -90,6 +90,38 @@
                                 </p>
                             </div>
                         </div>
+
+                        <div class="service-card">
+                            <h3>Legacy Service</h3>
+                            <div class="status-indicator">
+                                <span :class="['status-dot', services.legacy.running ? 'running' : 'stopped']"></span>
+                                <span class="status-text">{{ services.legacy.running ? 'Running' : 'Stopped' }}</span>
+                            </div>
+                            <div class="service-info">
+                                <p><strong>PID:</strong> <span>{{ services.legacy.pid || '-' }}</span></p>
+                                <p><strong>Port:</strong> 3212</p>
+                                <p><strong>Upstream Config:</strong> 
+                                    <el-select 
+                                        v-model="services.legacy.config" 
+                                        placeholder="Select configuration..."
+                                        @change="switchConfig('legacy', $event)"
+                                        size="small"
+                                        style="width: 150px;"
+                                        :disabled="isLoadbalanceWeightMode">
+                                        <el-option 
+                                            v-for="config in legacyConfigs" 
+                                            :key="config" 
+                                            :label="config" 
+                                            :value="config">
+                                        </el-option>
+                                    </el-select>
+                                </p>
+                                <p v-if="isLoadbalanceWeightMode" class="loadbalance-hint">
+                                    <i class="el-icon-warning-outline"></i>
+                                    <span>{{ loadbalanceDisabledNotice }}</span>
+                                </p>
+                            </div>
+                        </div>
                     </div>
                 </section>
 
@@ -309,9 +341,9 @@
                     </div>
 
                     <div class="loadbalance-details" v-if="isLoadbalanceWeightMode" v-loading="loadbalanceLoading">
-                        <div class="lb-service-block" v-for="service in ['claude', 'codex']" :key="service">
+                        <div class="lb-service-block" v-for="service in ['claude', 'codex', 'legacy']" :key="service">
                             <div class="lb-block-header">
-                                <h4>{{ service === 'claude' ? 'Claude' : 'Codex' }} Forwarding Order</h4>
+                                <h4>{{ service === 'claude' ? 'Claude' : (service === 'codex' ? 'Codex' : 'Legacy') }} Forwarding Order</h4>
                                 <el-button type="text" size="small"
                                            :loading="resettingFailures[service]"
                                            @click="resetLoadbalanceFailures(service)">
@@ -374,6 +406,12 @@
                     @click="activeConfigTab = 'codex'"
                     size="small">
                     Codex Configuration
+                </el-button>
+                <el-button 
+                    :type="activeConfigTab === 'legacy' ? 'primary' : ''"
+                    @click="activeConfigTab = 'legacy'"
+                    size="small">
+                    Legacy Configuration
                 </el-button>
             </div>
             
@@ -683,6 +721,359 @@
     "auth_token": "Auth token value",
     "api_key": "Use this for providers that expect x-api-key",
     "active": false
+  }
+}</code>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div v-show="activeConfigTab === 'legacy'" class="tab-panel">
+                    <div class="config-editor">
+                        <!-- Mode switch area -->
+                        <div class="config-mode-tabs">
+                            <el-button
+                                :type="configEditMode === 'merged' ? 'primary' : ''"
+                                @click="switchToMergedMode"
+                                size="small">
+                                Merged Mode
+                            </el-button>
+                            <el-button
+                                :type="configEditMode === 'interactive' ? 'primary' : ''"
+                                @click="configEditMode = 'interactive'"
+                                size="small">
+                                <i class="el-icon-data-analysis mode-icon"></i>Interactive Mode
+                            </el-button>
+                            <el-button
+                                :type="configEditMode === 'json' ? 'primary' : ''"
+                                @click="configEditMode = 'json'"
+                                size="small">
+                                JSON Mode
+                            </el-button>
+                        </div>
+
+                        <!-- Merged mode content -->
+                        <div v-show="configEditMode === 'merged'" class="merged-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="success"
+                                        size="small"
+                                        @click="openMergedDialog('legacy')">
+                                        Add Site
+                                    </el-button>
+                                    <el-button
+                                        type="primary"
+                                        size="small"
+                                        :loading="configSaving"
+                                        @click="saveMergedConfig('legacy')">
+                                        Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+
+                            <!-- Group list -->
+                            <div class="merged-groups-container">
+                                <div
+                                    v-for="(group, groupIndex) in mergedConfigs.legacy"
+                                    :key="group.baseUrl"
+                                    :class="['merged-group-card', { 'merged-group-active': isMergedGroupActive(group) }]">
+
+                                    <!-- Group header -->
+                                    <div class="merged-group-header">
+                                        <div class="group-field">
+                                            <label>Upstream URL:</label>
+                                            <el-input
+                                                v-model="group.baseUrl"
+                                                placeholder="https://api.example.com"
+                                                @blur="applyMergedGroupUpdate('legacy', groupIndex)"
+                                                style="width: 350px;">
+                                            </el-input>
+                                        </div>
+
+                                        <div class="group-field">
+                                            <label>Weight:</label>
+                                            <el-input-number
+                                                v-model="group.weight"
+                                                :min="0"
+                                                :step="1"
+                                                @change="applyMergedGroupUpdate('legacy', groupIndex)"
+                                                style="width: 120px;">
+                                            </el-input-number>
+                                        </div>
+
+                                        <div class="group-field">
+                                            <label>RPM Limit:</label>
+                                            <el-input-number
+                                                v-model="group.rpmLimit"
+                                                :min="1"
+                                                :max="240"
+                                                :step="1"
+                                                @change="applyMergedGroupUpdate('legacy', groupIndex)"
+                                                style="width: 140px;">
+                                            </el-input-number>
+                                        </div>
+
+                                        <div class="group-field">
+                                            <label>Authentication Method:</label>
+                                            <el-radio-group
+                                                v-model="group.authType"
+                                                @change="applyMergedGroupUpdate('legacy', groupIndex)"
+                                                size="small">
+                                                <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                                <el-radio-button label="api_key">API Key</el-radio-button>
+                                            </el-radio-group>
+                                        </div>
+                                    </div>
+
+                                    <!-- Credential summary -->
+                                    <div class="merged-group-summary">
+                                        <el-divider>
+                                            Credential Entries · {{ group.entries.length }} total
+                                        </el-divider>
+                                    </div>
+
+                                    <!-- Group footer actions -->
+                                    <div class="merged-group-footer">
+                                        <el-button
+                                            type="primary"
+                                            size="small"
+                                            plain
+                                            @click="editMergedGroup('legacy', groupIndex)">
+                                            Edit
+                                        </el-button>
+                                        <el-button
+                                            type="danger"
+                                            size="small"
+                                            plain
+                                            @click="deleteMergedGroup('legacy', groupIndex)">
+                                            Delete Site Group
+                                        </el-button>
+                                    </div>
+                                </div>
+
+                                <!-- Empty state -->
+                                <div v-if="mergedConfigs.legacy.length === 0" class="merged-empty-state">
+                                    <el-empty description="No grouped configurations yet. Click Add Site to begin."></el-empty>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Interactive mode content -->
+                        <div v-show="configEditMode === 'interactive'" class="interactive-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="success"
+                                        size="small"
+                                        @click="startAddingSite('legacy')">Add Site
+                                    </el-button>
+                                    <el-button
+                                        type="primary"
+                                        size="small"
+                                        :loading="configSaving"
+                                        @click="saveInteractiveConfig('legacy')">Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+
+                            <div class="config-sites-container">
+                                <!-- New site editor -->
+                                <div v-if="editingNewSite.legacy" class="config-site-card new-site-editor">
+                                    <div class="config-field">
+                                        <label class="field-label">Site Name:</label>
+                                        <el-input
+                                            v-model="newSiteData.legacy.name"
+                                            placeholder="Example: Legacy-Primary"
+                                            class="new-site-name-input"
+                                            @keyup.enter="confirmAddSite('legacy')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Upstream URL:</label>
+                                        <el-input
+                                            v-model="newSiteData.legacy.baseUrl"
+                                            placeholder="Example: https://api.example.com">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Weight:</label>
+                                        <el-input-number
+                                            v-model.number="newSiteData.legacy.weight"
+                                            :min="0"
+                                            :step="1">
+                                        </el-input-number>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">RPM Limit:</label>
+                                        <el-input-number
+                                            v-model.number="newSiteData.legacy.rpmLimit"
+                                            :min="0"
+                                            :max="120"
+                                            :step="1">
+                                        </el-input-number>
+                                        <p class="field-hint">0 or blank = unlimited throttling.</p>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Authentication Method:</label>
+                                        <el-radio-group v-model="newSiteData.legacy.authType">
+                                            <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                            <el-radio-button label="api_key">API Key</el-radio-button>
+                                        </el-radio-group>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Credential:</label>
+                                        <el-input
+                                            v-model="newSiteData.legacy.authValue"
+                                            :placeholder="newSiteData.legacy.authType === 'auth_token' ? 'Auth Token' : 'API Key'"
+                                            type="password"
+                                            show-password>
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Active Status:</label>
+                                        <div class="field-control">
+                                            <el-switch v-model="newSiteData.legacy.active"></el-switch>
+                                            <div class="config-actions-inline">
+                                                <el-button @click="cancelAddSite('legacy')" size="small">Cancel</el-button>
+                                                <el-button type="primary" @click="confirmAddSite('legacy')" size="small">Confirm</el-button>
+                                                <el-button type="info" @click="testNewSiteConnection('legacy')" size="small" plain>Test</el-button>
+                                            </div>
+                                        </div>
+                                        <div class="config-help-inline" v-if="newSiteTestResult.legacy">
+                                            <p :class="newSiteTestResult.legacy.success ? 'success-text' : 'error-text'">
+                                                Test status: {{ newSiteTestResult.legacy.success ? 'Success' : 'Failed' }}
+                                                <span v-if="newSiteTestResult.legacy.status_code"> (HTTP {{ newSiteTestResult.legacy.status_code }})</span>
+                                            </p>
+                                            <p class="help-inline" v-if="newSiteTestResult.legacy.error_message">
+                                                {{ newSiteTestResult.legacy.error_message }}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Existing sites list -->
+                                <div
+                                    class="config-site-card"
+                                    v-for="(site, index) in friendlyConfigs.legacy"
+                                    :key="site.__mergedId || index">
+                                    <div class="config-field">
+                                        <label class="field-label">Site Name:</label>
+                                        <el-input
+                                            v-model="site.name"
+                                            placeholder="Example: Legacy-Primary"
+                                            @input="syncFormToJson('legacy')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Upstream URL:</label>
+                                        <el-input
+                                            v-model="site.baseUrl"
+                                            placeholder="https://api.example.com"
+                                            @input="syncFormToJson('legacy')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Weight:</label>
+                                        <el-input-number
+                                            v-model.number="site.weight"
+                                            :min="0"
+                                            :step="1"
+                                            @change="syncFormToJson('legacy')">
+                                        </el-input-number>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">RPM Limit:</label>
+                                        <el-input-number
+                                            v-model.number="site.rpmLimit"
+                                            :min="0"
+                                            :max="120"
+                                            :step="1"
+                                            @change="syncFormToJson('legacy')">
+                                        </el-input-number>
+                                        <p class="field-hint">0 or blank keeps requests unlimited; set a positive value to enforce RPM.</p>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Authentication Method:</label>
+                                        <el-radio-group v-model="site.authType" @change="syncFormToJson('legacy')">
+                                            <el-radio-button label="auth_token">Auth Token</el-radio-button>
+                                            <el-radio-button label="api_key">API Key</el-radio-button>
+                                        </el-radio-group>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Credential:</label>
+                                        <el-input
+                                            v-model="site.authValue"
+                                            :placeholder="site.authType === 'auth_token' ? 'Auth Token' : 'API Key'"
+                                            type="password"
+                                            show-password
+                                            @input="syncFormToJson('legacy')">
+                                        </el-input>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Active Status:</label>
+                                        <div class="field-control">
+                                            <el-switch
+                                                v-model="site.active"
+                                                @change="handleActiveChange('legacy', index, $event)">
+                                            </el-switch>
+                                            <div class="config-actions-inline">
+                                                <el-button
+                                                    @click="removeConfigSite('legacy', index)"
+                                                    type="danger"
+                                                    size="small">
+                                                    Delete
+                                                </el-button>
+                                                <el-button
+                                                    @click="testSiteConnection('legacy', index)"
+                                                    type="info"
+                                                    size="small"
+                                                    plain>
+                                                    Test
+                                                </el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-form-help" v-if="friendlyConfigs.legacy.length === 0 && !editingNewSite.legacy">
+                                    <p><em>No site configuration yet. Click "Add Site" to get started.</em></p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- JSON mode content -->
+                        <div v-show="configEditMode === 'json'" class="json-mode-container">
+                            <div class="config-form-header">
+                                <label>Site Configuration Management:</label>
+                                <div class="config-actions">
+                                    <el-button
+                                        type="primary"
+                                        @click="saveConfig"
+                                        :loading="configSaving"
+                                        size="small">
+                                        Save Configuration
+                                    </el-button>
+                                </div>
+                            </div>
+                            <label>legacy.json Configuration:</label>
+                            <el-input
+                                v-model="configContents.legacy"
+                                type="textarea"
+                                :rows="20"
+                                placeholder="Loading..."
+                                style="font-family: monospace;">
+                            </el-input>
+                            <div class="config-help">
+                                <p><strong>Sample structure:</strong></p>
+                                <code>{
+  "My Legacy Site": {
+    "base_url": "https://api.example.com",
+    "auth_token": "Bearer token",
+    "active": true,
+    "rpm_limit": 15
   }
 }</code>
                             </div>
@@ -1857,6 +2248,81 @@
                                 </div>
                             </div>
                         </el-tab-pane>
+
+                        <el-tab-pane label="Legacy Model Mapping" name="legacy">
+                            <div class="mapping-section">
+                                <div class="mapping-header">
+                                    <h4>Legacy mapping rules</h4>
+                                    <el-button type="primary" size="small" @click="addModelMapping('legacy')">
+                                        <i class="el-icon-plus"></i> Add Mapping
+                                    </el-button>
+                                </div>
+                                
+                                <div class="mapping-list" v-if="routingConfig.modelMappings.legacy.length > 0">
+                                    <div class="mapping-item" v-for="(mapping, index) in routingConfig.modelMappings.legacy" :key="index">
+                                        <div class="mapping-fields">
+                                            <div class="mapping-field-compact">
+                                                <label>Source Type:</label>
+                                                <el-select
+                                                    v-model="mapping.source_type"
+                                                    placeholder="Select type"
+                                                    size="small"
+                                                    style="width: 80px;">
+                                                    <el-option label="Model" value="model"></el-option>
+                                                    <el-option label="Config" value="config"></el-option>
+                                                </el-select>
+                                            </div>
+                                            <div class="mapping-field-compact">
+                                                <label v-if="mapping.source_type === 'model'">Source Model:</label>
+                                                <label v-else>Use Config:</label>
+                                                <el-select
+                                                    v-if="mapping.source_type === 'config'"
+                                                    v-model="mapping.source"
+                                                    placeholder="Select config"
+                                                    size="small"
+                                                    style="width: 520px;">
+                                                    <el-option
+                                                        v-for="config in legacyConfigs"
+                                                        :key="config"
+                                                        :label="config"
+                                                        :value="config">
+                                                    </el-option>
+                                                </el-select>
+                                                <el-input
+                                                    v-else
+                                                    v-model="mapping.source"
+                                                    placeholder="e.g., provider-2/gpt-5"
+                                                    size="small"
+                                                    style="width: 220px;">
+                                                </el-input>
+                                            </div>
+                                            <div class="mapping-arrow-compact">→</div>
+                                            <div class="mapping-field-compact">
+                                                <label>Target Model:</label>
+                                                <el-input
+                                                    v-model="mapping.target"
+                                                    placeholder="e.g., provider-7/claude-sonnet-4-5-20250929"
+                                                    size="small"
+                                                    style="width: 220px;">
+                                                </el-input>
+                                            </div>
+                                            <div class="mapping-actions-compact">
+                                                <el-button
+                                                    type="danger"
+                                                    size="small"
+                                                    @click="removeModelMapping('legacy', index)">
+                                                    Delete
+                                                </el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="empty-mapping" v-else>
+                                    <p>No mapping yet. Click "Add Mapping" to create one.</p>
+                                </div>
+                            </div>
+                        </el-tab-pane>
                     </el-tabs>
                 </div>
                 
@@ -1984,6 +2450,59 @@
                                 </div>
                             </div>
                         </el-tab-pane>
+
+                        <el-tab-pane label="Legacy Config Mapping" name="legacy">
+                            <div class="mapping-section">
+                                <div class="mapping-header">
+                                    <h4>Legacy mapping rules</h4>
+                                    <el-button type="primary" size="small" @click="addConfigMapping('legacy')">
+                                        <i class="el-icon-plus"></i> Add Mapping
+                                    </el-button>
+                                </div>
+                                
+                                <div class="mapping-list" v-if="routingConfig.configMappings.legacy.length > 0">
+                                    <div class="mapping-item" v-for="(mapping, index) in routingConfig.configMappings.legacy" :key="index">
+                                        <div class="mapping-form">
+                                            <div class="mapping-field">
+                                                <label>Model Name:</label>
+                                                <el-input 
+                                                    v-model="mapping.model" 
+                                                    placeholder="e.g., provider-2/gpt-5"
+                                                    size="small">
+                                                </el-input>
+                                            </div>
+                                            <div class="mapping-arrow">→</div>
+                                            <div class="mapping-field">
+                                                <label>Assign Config:</label>
+                                                <el-select 
+                                                    v-model="mapping.config" 
+                                                    placeholder="Select config"
+                                                    size="small">
+                                                    <el-option 
+                                                        v-for="config in legacyConfigs" 
+                                                        :key="config" 
+                                                        :label="config" 
+                                                        :value="config">
+                                                    </el-option>
+                                                </el-select>
+                                            </div>
+                                            <div class="mapping-actions">
+                                                <el-button 
+                                                    type="danger" 
+                                                    size="small" 
+                                                    @click="removeConfigMapping('legacy', index)">
+                                                    Delete
+                                                </el-button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="empty-mapping" v-else>
+                                    <p>No mapping yet. Click "Add Mapping" to create one.</p>
+                                </div>
+                            </div>
+                        </el-tab-pane>
                     </el-tabs>
                 </div>
                 
@@ -2021,6 +2540,18 @@
                         :min="0"
                         :step="1">
                     </el-input-number>
+                </el-form-item>
+
+                <el-form-item label="RPM Limit:" v-if="mergedDialogService === 'legacy'">
+                    <el-input-number
+                        v-model="mergedDialogDraft.rpmLimit"
+                        :min="0"
+                        :max="240"
+                        :step="1">
+                    </el-input-number>
+                    <span class="dialog-help" style="margin-left: 8px;">
+                        Set 0 or leave blank for unlimited requests; positive values enforce RPM.
+                    </span>
                 </el-form-item>
 
                 <el-form-item label="Authentication Method:">

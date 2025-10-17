@@ -1,9 +1,8 @@
 import json
 import webbrowser
 import time
-import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from flask import Flask, jsonify, send_file, request
 import requests
 import uuid
@@ -27,6 +26,7 @@ LOG_FILE = DATA_DIR / 'proxy_requests.jsonl'
 OLD_LOG_FILE = DATA_DIR / 'traffic_statistics.jsonl'
 HISTORY_FILE = DATA_DIR / 'history_usage.json'
 SYSTEM_CONFIG_FILE = DATA_DIR / 'system.json'
+SUPPORTED_SERVICES = ('claude', 'codex', 'legacy')
 
 if OLD_LOG_FILE.exists() and not LOG_FILE.exists():
     try:
@@ -82,6 +82,17 @@ def _detect_config_renames(old_configs: Dict[str, Any], new_configs: Dict[str, A
             new_name = new_names[0]
             if old_name != new_name:
                 rename_map[old_name] = new_name
+
+def _normalize_service_name(service: str) -> Optional[str]:
+    """Map API parameters to known service identifiers."""
+    if not service:
+        return None
+    lower = service.lower()
+    if lower == 'a4f':
+        return 'legacy'
+    if lower in SUPPORTED_SERVICES:
+        return lower
+    return None
 
     return rename_map
 
@@ -501,6 +512,21 @@ def build_usage_snapshot() -> Dict[str, Any]:
     current_usage = aggregate_usage_from_logs(logs)
     history_usage = load_history_usage()
     combined_usage = combine_usage_maps(current_usage, history_usage)
+
+    def normalize_usage_services(usage_map: Dict[str, Dict[str, Dict[str, int]]]) -> Dict[str, Dict[str, Dict[str, int]]]:
+        normalized: Dict[str, Dict[str, Dict[str, int]]] = {}
+        for service, channels in usage_map.items():
+            normalized_service = 'legacy' if service == 'a4f' else service
+            bucket = normalized.setdefault(normalized_service, {})
+            for channel, metrics in channels.items():
+                existing = bucket.setdefault(channel, empty_metrics())
+                merge_usage_metrics(existing, metrics)
+        return normalized
+
+    current_usage = normalize_usage_services(current_usage)
+    history_usage = normalize_usage_services(history_usage)
+    combined_usage = normalize_usage_services(combined_usage)
+
     return {
         'logs': logs,
         'current_usage': current_usage,
@@ -526,20 +552,30 @@ def get_status():
         # Query controllers directly instead of relying on status.json
         from src.claude import ctl as claude
         from src.codex import ctl as codex
-        from src.config.cached_config_manager import claude_config_manager, codex_config_manager
+        from src.legacy import ctl as legacy
+        from src.config.cached_config_manager import (
+            claude_config_manager,
+            codex_config_manager,
+            legacy_config_manager,
+        )
         
         claude_running = claude.is_running()
         claude_pid = claude.get_pid() if claude_running else None
         claude_config = claude_config_manager.active_config
         
+        legacy_running = legacy.is_running()
+        legacy_pid = legacy.get_pid() if legacy_running else None
+        legacy_config = legacy_config_manager.active_config
+
         codex_running = codex.is_running()
         codex_pid = codex.get_pid() if codex_running else None
         codex_config = codex_config_manager.active_config
         
         # Count available configurations
         claude_configs = len(claude_config_manager.configs)
+        legacy_configs = len(legacy_config_manager.configs)
         codex_configs = len(codex_config_manager.configs)
-        total_configs = claude_configs + codex_configs
+        total_configs = claude_configs + codex_configs + legacy_configs
         
         usage_snapshot = build_usage_snapshot()
         logs = usage_snapshot['logs']
@@ -550,7 +586,7 @@ def get_status():
         for service_name, channels in combined_usage.items():
             service_usage_totals[service_name] = compute_total_metrics(channels)
 
-        for expected_service in ('claude', 'codex'):
+        for expected_service in SUPPORTED_SERVICES:
             service_usage_totals.setdefault(expected_service, empty_metrics())
 
         overall_totals = empty_metrics()
@@ -590,6 +626,11 @@ def get_status():
                     'pid': claude_pid,
                     'config': claude_config
                 },
+                'legacy': {
+                    'running': legacy_running,
+                    'pid': legacy_pid,
+                    'config': legacy_config
+                },
                 'codex': {
                     'running': codex_running,
                     'pid': codex_pid,
@@ -612,10 +653,11 @@ def get_status():
 def get_config(service):
     """Fetch the contents of the specified service configuration file."""
     try:
-        if service not in ['claude', 'codex']:
+        normalized_service = _normalize_service_name(service)
+        if not normalized_service:
             return jsonify({'error': 'Invalid service name'}), 400
         
-        config_file = Path.home() / '.clp' / f'{service}.json'
+        config_file = Path.home() / '.clp' / f'{normalized_service}.json'
         config_file.parent.mkdir(parents=True, exist_ok=True)
 
         if not config_file.exists():
@@ -637,7 +679,8 @@ def get_config(service):
 def save_config(service):
     """Persist the configuration file for the specified service."""
     try:
-        if service not in ['claude', 'codex']:
+        normalized_service = _normalize_service_name(service)
+        if not normalized_service:
             return jsonify({'error': 'Invalid service name'}), 400
         
         data = request.get_json()
@@ -652,7 +695,7 @@ def save_config(service):
         except json.JSONDecodeError as e:
             return jsonify({'error': f'Invalid JSON format: {str(e)}'}), 400
 
-        config_file = Path.home() / '.clp' / f'{service}.json'
+        config_file = Path.home() / '.clp' / f'{normalized_service}.json'
         old_content = None
         old_configs: Dict[str, Any] = {}
 
@@ -671,8 +714,8 @@ def save_config(service):
             with open(config_file, 'w', encoding='utf-8') as f:
                 f.write(content)
 
-            _apply_channel_renames(service, rename_map)
-            _cleanup_deleted_configs(service, old_configs, new_configs)
+            _apply_channel_renames(normalized_service, rename_map)
+            _cleanup_deleted_configs(normalized_service, old_configs, new_configs)
         except Exception as exc:
             # Restore the previous config to avoid partial updates
             if old_content is not None:
@@ -682,7 +725,7 @@ def save_config(service):
                 config_file.unlink(missing_ok=True)
             return jsonify({'error': f'Failed to save configuration: {exc}'}), 500
 
-        return jsonify({'success': True, 'message': f'{service} configuration saved successfully'})
+        return jsonify({'success': True, 'message': f'{normalized_service} configuration saved successfully'})
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -856,7 +899,7 @@ def clear_usage():
             LOG_FILE.touch(exist_ok=True)
 
         # Step 2: reset all values stored in history_usage.json
-        save_history_usage({"claude": {}, "codex":{}})
+        save_history_usage({"claude": {}, "codex": {}, "legacy": {}})
 
         return jsonify({'success': True, 'message': 'Token usage records cleared successfully'})
     except Exception as e:
@@ -873,14 +916,17 @@ def switch_config():
         if not service or not config:
             return jsonify({'error': 'Missing service or config parameter'}), 400
 
-        if service not in ['claude', 'codex']:
+        normalized_service = _normalize_service_name(service)
+        if not normalized_service:
             return jsonify({'error': 'Invalid service name'}), 400
 
         # Import the appropriate config manager
-        if service == 'claude':
+        if normalized_service == 'claude':
             from src.config.cached_config_manager import claude_config_manager as config_manager
-        else:
+        elif normalized_service == 'codex':
             from src.config.cached_config_manager import codex_config_manager as config_manager
+        else:
+            from src.config.cached_config_manager import legacy_config_manager as config_manager
 
         # Attempt to switch the configuration
         if config_manager.set_active_config(config):
@@ -889,7 +935,7 @@ def switch_config():
             if actual_config == config:
                 return jsonify({
                     'success': True,
-                    'message': f'{service} configuration switched to {config}',
+                    'message': f'{normalized_service} configuration switched to {config}',
                     'active_config': actual_config
                 })
             else:
@@ -952,7 +998,7 @@ def save_routing_config():
             return jsonify({'error': 'Invalid routing mode'}), 400
         
         # Ensure mapping entries exist for each service
-        for service in ['claude', 'codex']:
+        for service in SUPPORTED_SERVICES:
             if service not in data['modelMappings']:
                 data['modelMappings'][service] = []
             if service not in data['configMappings']:
@@ -989,7 +1035,8 @@ def test_connection():
         if not base_url:
             return jsonify({'error': 'Missing base_url parameter'}), 400
 
-        if service not in ['claude', 'codex']:
+        normalized_service = _normalize_service_name(service)
+        if not normalized_service:
             return jsonify({'error': 'Invalid service name'}), 400
 
         # Require at least one authentication method
@@ -997,10 +1044,12 @@ def test_connection():
             return jsonify({'error': 'Missing authentication (auth_token or api_key)'}), 400
 
         # Retrieve the relevant proxy instance
-        if service == 'claude':
+        if normalized_service == 'claude':
             from src.claude.proxy import proxy_service
-        else:
+        elif normalized_service == 'codex':
             from src.codex.proxy import proxy_service
+        else:
+            from src.legacy.proxy import proxy_service
 
         # Execute the connectivity probe
         result = proxy_service.test_endpoint(
@@ -1254,7 +1303,8 @@ def get_loadbalance_config():
             'mode': 'active-first',
             'services': {
                 'claude': default_section(),
-                'codex': default_section()
+                'codex': default_section(),
+                'legacy': default_section()
             }
         }
 
@@ -1268,11 +1318,12 @@ def get_loadbalance_config():
             'mode': raw_config.get('mode', 'active-first'),
             'services': {
                 'claude': default_section(),
-                'codex': default_section()
+                'codex': default_section(),
+                'legacy': default_section()
             }
         }
 
-        for service in ['claude', 'codex']:
+        for service in SUPPORTED_SERVICES:
             section = raw_config.get('services', {}).get(service, {})
             threshold = section.get('failureThreshold', section.get('failover_count', 3))
             try:
@@ -1328,7 +1379,7 @@ def save_loadbalance_config():
             'services': {}
         }
 
-        for service in ['claude', 'codex']:
+        for service in SUPPORTED_SERVICES:
             section = services.get(service, {})
             threshold = section.get('failureThreshold', 3)
             try:
@@ -1380,7 +1431,8 @@ def reset_loadbalance_failures():
         service = data.get('service')
         config_name = data.get('config_name')  # Optional; when absent reset all
 
-        if not service or service not in ['claude', 'codex']:
+        normalized_service = _normalize_service_name(service)
+        if not normalized_service:
             return jsonify({'error': 'Invalid service parameter'}), 400
 
         lb_config_file = DATA_DIR / 'lb_config.json'
@@ -1393,7 +1445,7 @@ def reset_loadbalance_failures():
             config = json.load(f)
 
         services = config.setdefault('services', {})
-        service_config = services.setdefault(service, {
+        service_config = services.setdefault(normalized_service, {
             'failureThreshold': 3,
             'currentFailures': {},
             'excludedConfigs': []
@@ -1408,11 +1460,11 @@ def reset_loadbalance_failures():
                 current_failures[key] = 0
             if key in excluded_configs:
                 excluded_configs.remove(key)
-            message = f'Reset failure counters for {service}:{key}'
+            message = f'Reset failure counters for {normalized_service}:{key}'
         else:
             service_config['currentFailures'] = {}
             service_config['excludedConfigs'] = []
-            message = f'Reset all failure counters for {service}'
+            message = f'Reset all failure counters for {normalized_service}'
 
         with open(lb_config_file, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
