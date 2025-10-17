@@ -456,10 +456,10 @@ class LegacyProxy(BaseProxyService):
                 # OR if streaming is explicitly requested
                 if has_tools or streaming_requested:
                     if has_tools:
-                        # IMPORTANT: A4F API does NOT support streaming with tool calling
-                        # Must use stream=False to get tool_calls in response
+                        # A4F API does NOT support streaming with tool calling
+                        # Send stream=False to get tool_calls, but still transform to SSE for client
                         payload['stream'] = False
-                        request.state.legacy_chatcompletions_stream = False
+                        request.state.legacy_chatcompletions_stream = True
                     else:
                         # No tools, so respect the streaming preference
                         request.state.legacy_chatcompletions_stream = streaming_requested
