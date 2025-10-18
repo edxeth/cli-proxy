@@ -398,6 +398,11 @@ class LegacyProxy(BaseProxyService):
         headers.setdefault('accept', 'application/json')
         headers.setdefault('user-agent', 'cli-proxy-legacy/1.0')
 
+        # Get site streaming configuration
+        configs = self.config_manager.configs
+        config_data = configs.get(active_config_name, {})
+        site_streaming = config_data.get('streaming')  # None (auto), True (force on), or False (force off)
+
         normalized_path = path.lstrip('/').lower()
 
         # Map /responses payloads into chat completions for better compatibility
@@ -446,29 +451,51 @@ class LegacyProxy(BaseProxyService):
                 stream_value = payload.get('stream')
                 has_tools = bool(payload.get('tools'))
 
-                streaming_requested = False
+                # Determine what the client requested
+                client_wants_streaming = False
                 if isinstance(stream_value, bool):
-                    streaming_requested = stream_value
+                    client_wants_streaming = stream_value
                 elif isinstance(stream_value, str):
-                    streaming_requested = stream_value.strip().lower() not in {'', '0', 'false', 'no'}
+                    client_wants_streaming = stream_value.strip().lower() not in {'', '0', 'false', 'no'}
 
-                # Determine if SSE transformation is needed
-                if streaming_requested:
-                    # Client requested streaming
+                # Apply site streaming configuration
+                # site_streaming: None (auto/default), True (force on), False (force off)
+                if site_streaming is True:
+                    # Site forces streaming ON
+                    # BUT: A4F API does NOT support streaming with tool calling
                     if has_tools:
-                        # A4F API does NOT support streaming with tool calling
                         # Send stream=False to get tool_calls, but transform to SSE for client
-                        payload['stream'] = False
-                        request.state.legacy_chatcompletions_stream = True
+                        use_upstream_streaming = False
+                        transform_to_sse = True
                     else:
-                        # No tools, respect the streaming request
-                        request.state.legacy_chatcompletions_stream = True
-                    headers['accept'] = 'application/json'
+                        # No tools, so we can stream
+                        use_upstream_streaming = True
+                        transform_to_sse = True
+                elif site_streaming is False:
+                    # Site forces streaming OFF - never stream
+                    use_upstream_streaming = False
+                    transform_to_sse = False
                 else:
-                    # Client did NOT request streaming
-                    # Even if tools are present, send JSON response (don't transform to SSE)
-                    # The client expects JSON when they don't ask for streaming
-                    request.state.legacy_chatcompletions_stream = False
+                    # Auto mode (site_streaming is None) - respect client preference
+                    if has_tools:
+                        # A4F doesn't support streaming with tools
+                        # Send stream=False but transform to SSE if client wants streaming
+                        use_upstream_streaming = False
+                        transform_to_sse = client_wants_streaming
+                    else:
+                        # No tools, respect the client preference
+                        use_upstream_streaming = client_wants_streaming
+                        transform_to_sse = client_wants_streaming
+
+                # Update the payload with the final streaming decision
+                payload['stream'] = use_upstream_streaming
+                request.state.legacy_chatcompletions_stream = transform_to_sse
+
+                # Set appropriate accept header
+                if transform_to_sse:
+                    headers['accept'] = 'text/event-stream'
+                else:
+                    headers['accept'] = 'application/json'
 
                 converted_messages = self._wrap_convert_input_blocks(payload.get('input'))
                 if converted_messages:
@@ -491,9 +518,17 @@ class LegacyProxy(BaseProxyService):
                     payload['messages'] = _flatten_tool_messages(payload['messages'])
 
                 modified_body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-                # Log what we're sending upstream for Opus
-                if 'opus' in payload.get('model', '').lower():
-                    self.logger.info(f"Sending to upstream - model: {payload.get('model')}, stream: {payload.get('stream')}, has_tools: {bool(payload.get('tools'))}, messages: {len(payload.get('messages', []))}")
+
+                # Log streaming configuration details
+                self.logger.info(
+                    f"Sending to upstream - model: {payload.get('model')}, "
+                    f"stream: {payload.get('stream')}, "
+                    f"site_streaming: {site_streaming}, "
+                    f"client_requested: {client_wants_streaming}, "
+                    f"has_tools: {has_tools}, "
+                    f"will_transform_sse: {transform_to_sse}, "
+                    f"messages: {len(payload.get('messages', []))}"
+                )
             else:
                 request.state.legacy_chatcompletions_stream = False
         
