@@ -829,6 +829,19 @@
                                         </div>
 
                                         <div class="group-field">
+                                            <label>Tool Calls Streaming:</label>
+                                            <el-select
+                                                v-model="group.toolCallsStreaming"
+                                                @change="applyMergedGroupUpdate('legacy', groupIndex)"
+                                                placeholder="Auto"
+                                                style="width: 180px;">
+                                                <el-option label="Auto (stream if available)" :value="null"></el-option>
+                                                <el-option label="Always ON" :value="true"></el-option>
+                                                <el-option label="Always OFF" :value="false"></el-option>
+                                            </el-select>
+                                        </div>
+
+                                        <div class="group-field">
                                             <label>Authentication Method:</label>
                                             <el-radio-group
                                                 v-model="group.authType"
@@ -1041,6 +1054,18 @@
                                             <el-option label="Always OFF" :value="false"></el-option>
                                         </el-select>
                                         <p class="field-hint">Control streaming behavior for this site.</p>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="field-label">Tool Calls Streaming:</label>
+                                        <el-select
+                                            v-model="site.toolCallsStreaming"
+                                            @change="syncFormToJson('legacy')"
+                                            placeholder="Auto">
+                                            <el-option label="Auto (stream if available)" :value="null"></el-option>
+                                            <el-option label="Always ON" :value="true"></el-option>
+                                            <el-option label="Always OFF" :value="false"></el-option>
+                                        </el-select>
+                                        <p class="field-hint">When responses have tool calls, stream them if supported. OFF forces stream=false when tools present.</p>
                                     </div>
                                     <div class="config-field">
                                         <label class="field-label">Authentication Method:</label>
