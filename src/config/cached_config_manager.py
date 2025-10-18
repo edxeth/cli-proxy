@@ -37,11 +37,6 @@ class CachedConfigManager:
         """Ensure the config file exists; return True if newly created."""
         self._ensure_config_dir()
         if not self.config_file.exists():
-            if self.service_name == 'legacy':
-                legacy_alias = self.config_dir / 'a4f.json'
-                if legacy_alias.exists():
-                    legacy_alias.rename(self.config_file)
-                    return False
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
             return True
@@ -116,7 +111,37 @@ class CachedConfigManager:
                         rpm_value = None
                     if rpm_value is not None:
                         configs[config_name]['rpm_limit'] = rpm_value
-                    
+
+                    # Parse optional streaming preference (true/false/auto)
+                    # true = always use streaming, false = never use streaming, auto/None = let client decide
+                    streaming_value = config_data.get('streaming')
+                    if streaming_value is not None:
+                        if isinstance(streaming_value, bool):
+                            configs[config_name]['streaming'] = streaming_value
+                        elif isinstance(streaming_value, str):
+                            streaming_lower = streaming_value.strip().lower()
+                            if streaming_lower in ('true', '1', 'yes', 'on'):
+                                configs[config_name]['streaming'] = True
+                            elif streaming_lower in ('false', '0', 'no', 'off'):
+                                configs[config_name]['streaming'] = False
+                            elif streaming_lower == 'auto':
+                                configs[config_name]['streaming'] = None
+
+                    # Parse optional tool_calls_streaming preference (true/false/auto)
+                    # true = allow streaming with tools, false = disable streaming with tools, auto/None = default behavior
+                    tool_calls_streaming_value = config_data.get('tool_calls_streaming')
+                    if tool_calls_streaming_value is not None:
+                        if isinstance(tool_calls_streaming_value, bool):
+                            configs[config_name]['tool_calls_streaming'] = tool_calls_streaming_value
+                        elif isinstance(tool_calls_streaming_value, str):
+                            tool_calls_streaming_lower = tool_calls_streaming_value.strip().lower()
+                            if tool_calls_streaming_lower in ('true', '1', 'yes', 'on'):
+                                configs[config_name]['tool_calls_streaming'] = True
+                            elif tool_calls_streaming_lower in ('false', '0', 'no', 'off'):
+                                configs[config_name]['tool_calls_streaming'] = False
+                            elif tool_calls_streaming_lower == 'auto':
+                                configs[config_name]['tool_calls_streaming'] = None
+
                     # Capture the active marker if set
                     if config_data.get('active', False):
                         active_config = config_name
@@ -210,6 +235,12 @@ class CachedConfigManager:
 
             if 'rpm_limit' in config and config['rpm_limit'] is not None:
                 data[name]['rpm_limit'] = config['rpm_limit']
+
+            if 'streaming' in config:
+                data[name]['streaming'] = config['streaming']
+
+            if 'tool_calls_streaming' in config:
+                data[name]['tool_calls_streaming'] = config['tool_calls_streaming']
         
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:

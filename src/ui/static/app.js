@@ -98,6 +98,7 @@ const app = createApp({
             weight: 0,
             authType: 'auth_token',
             rpmLimit: null,
+            streaming: null,  // null (auto), true (force on), false (force off)
             entries: []  // [{ name, authValue, active }]
         });
         const mergedDialogMode = ref('add');
@@ -127,7 +128,8 @@ const app = createApp({
                 authValue: '',
                 active: false,
                 weight: 0,
-                rpmLimit: 0
+                rpmLimit: 0,
+                streaming: null
             },
             codex: {
                 name: '',
@@ -1613,6 +1615,14 @@ const app = createApp({
                             if (Number.isFinite(rpmValue) && rpmValue > 0) {
                                 config.rpm_limit = rpmValue;
                             }
+                            // Add streaming configuration
+                            if (site.streaming !== undefined) {
+                                config.streaming = site.streaming;
+                            }
+                            // Add tool calls streaming configuration
+                            if (site.toolCallsStreaming !== undefined) {
+                                config.tool_calls_streaming = site.toolCallsStreaming;
+                            }
                         }
 
                         jsonObj[site.name.trim()] = config;
@@ -1670,16 +1680,27 @@ const app = createApp({
                             rpmLimit = Number.isFinite(rawRpm) && rawRpm > 0 ? rawRpm : 0;
                         }
 
-                        sites.push({
+                        const siteObj = {
                             name: siteName,
                             baseUrl: config.base_url || '',
                             authType: authType,
                             authValue: authValue,
                             active: config.active || false,
                             weight: weightValue,
-                        rpmLimit: rpmLimit,
+                            rpmLimit: rpmLimit,
                             __mergedId: generateEntryId()
-                        });
+                        };
+
+                        if (service === 'legacy') {
+                            if (config.streaming !== undefined) {
+                                siteObj.streaming = config.streaming;
+                            }
+                            if (config.tool_calls_streaming !== undefined) {
+                                siteObj.toolCallsStreaming = config.tool_calls_streaming;
+                            }
+                        }
+
+                        sites.push(siteObj);
                     }
                 });
 
@@ -1872,6 +1893,12 @@ const app = createApp({
                         rpmLimit: service === 'legacy'
                             ? (Number.isFinite(site.rpmLimit) && site.rpmLimit > 0 ? site.rpmLimit : 0)
                             : null,
+                        streaming: service === 'legacy'
+                            ? (site.streaming !== undefined ? site.streaming : null)
+                            : null,
+                        toolCallsStreaming: service === 'legacy'
+                            ? (site.toolCallsStreaming !== undefined ? site.toolCallsStreaming : null)
+                            : null,
                         entries: []
                     });
                 }
@@ -1925,7 +1952,7 @@ const app = createApp({
                     const siteId = entry.siteId || generateEntryId();
                     entry.siteId = siteId;
                     entry.lastSyncedName = entry.name;
-                    newFriendly.push({
+                    const newSiteObj = {
                         name: entry.name,
                         baseUrl: group.baseUrl,
                         weight: group.weight,
@@ -1936,7 +1963,18 @@ const app = createApp({
                             ? (Number.isFinite(group.rpmLimit) && group.rpmLimit > 0 ? group.rpmLimit : 0)
                             : undefined,
                         __mergedId: siteId
-                    });
+                    };
+
+                    if (service === 'legacy') {
+                        if (group.streaming !== undefined) {
+                            newSiteObj.streaming = group.streaming;
+                        }
+                        if (group.toolCallsStreaming !== undefined) {
+                            newSiteObj.toolCallsStreaming = group.toolCallsStreaming;
+                        }
+                    }
+
+                    newFriendly.push(newSiteObj);
                 });
             });
 
@@ -2298,6 +2336,7 @@ const app = createApp({
             mergedDialogDraft.weight = 0;
             mergedDialogDraft.authType = 'auth_token';
             mergedDialogDraft.rpmLimit = service === 'legacy' ? 0 : null;
+            mergedDialogDraft.streaming = service === 'legacy' ? null : null;
             mergedDialogDraft.entries = [
                 { name: '', authValue: '', active: false, siteId: null, lastSyncedName: '' }
             ];
@@ -2323,6 +2362,9 @@ const app = createApp({
             mergedDialogDraft.authType = group.authType;
             mergedDialogDraft.rpmLimit = service === 'legacy'
                 ? (Number.isFinite(group.rpmLimit) ? group.rpmLimit : 0)
+                : null;
+            mergedDialogDraft.streaming = service === 'legacy'
+                ? (group.streaming !== undefined ? group.streaming : null)
                 : null;
             mergedDialogDraft.entries = group.entries.length > 0
                 ? group.entries.map(entry => ({
@@ -2499,6 +2541,7 @@ const app = createApp({
                         authValue: entry.authValue,
                         active: entry.active,
                         rpmLimit: service === 'legacy' ? draft.rpmLimit : undefined,
+                        streaming: service === 'legacy' ? draft.streaming : undefined,
                         __mergedId: siteId
                     };
                 });
@@ -2544,6 +2587,8 @@ const app = createApp({
                             friendlyItem.active = entry.active;
                             if (service === 'legacy') {
                                 friendlyItem.rpmLimit = draft.rpmLimit;
+                                friendlyItem.streaming = draft.streaming;
+                                friendlyItem.toolCallsStreaming = draft.toolCallsStreaming;
                             }
                             friendlyItem.__mergedId = entry.siteId;
                         }
@@ -2559,6 +2604,8 @@ const app = createApp({
                             authValue: entry.authValue,
                             active: entry.active,
                             rpmLimit: service === 'legacy' ? draft.rpmLimit : undefined,
+                            streaming: service === 'legacy' ? draft.streaming : undefined,
+                            toolCallsStreaming: service === 'legacy' ? draft.toolCallsStreaming : undefined,
                             __mergedId: newSiteId
                         });
                     }
