@@ -514,10 +514,8 @@ class LegacyProxy(BaseProxyService):
                 request.state.legacy_chatcompletions_stream = transform_to_sse
 
                 # Set appropriate accept header
-                if transform_to_sse:
-                    headers['accept'] = 'text/event-stream'
-                else:
-                    headers['accept'] = 'application/json'
+                # Always request JSON from upstream - if we need SSE, we'll transform it
+                headers['accept'] = 'application/json'
 
                 converted_messages = self._wrap_convert_input_blocks(payload.get('input'))
                 if converted_messages:
