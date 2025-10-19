@@ -74,6 +74,7 @@ def _inject_image_tool_results(message_list: Any) -> Any:
                 'arguments': parsed_args
             }
 
+
     for message in messages_clone:
         if not isinstance(message, dict):
             continue
@@ -87,6 +88,7 @@ def _inject_image_tool_results(message_list: Any) -> Any:
             continue
         if tool_call.get('name') != 'Read':
             continue
+
 
         existing_content = message.get('content')
         if isinstance(existing_content, str) and 'data:image' in existing_content:
