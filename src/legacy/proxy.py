@@ -475,9 +475,9 @@ class LegacyProxy(BaseProxyService):
 
                 if has_tools:
                     # A4F API does NOT support streaming with tool calling
-                    # ALWAYS use stream=False when tools are present, never transform to SSE
+                    # Send stream=False to get tool_calls, but if client wants streaming, transform to SSE
                     use_upstream_streaming = False
-                    transform_to_sse = False
+                    transform_to_sse = client_wants_streaming
                 elif site_streaming is True:
                     # Site forces streaming ON, no tools present - can stream
                     use_upstream_streaming = True
