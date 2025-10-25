@@ -6,7 +6,9 @@ import datetime
 import time
 import json
 from pathlib import Path
+from typing import Optional
 from urllib import request as urllib_request, error as urllib_error
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi.middleware.cors import CORSMiddleware
 from ..core.base_proxy import BaseProxyService
@@ -59,6 +61,28 @@ def _load_codex_prompt() -> str:
 
 # Minimal CLI-style instructions used for helper builders and parity
 INSTRUCTIONS_CLI = _load_codex_prompt()
+PRIMARY_INSTRUCTION = (
+    INSTRUCTIONS_CLI.splitlines()[0].strip()
+    if INSTRUCTIONS_CLI.splitlines()
+    else "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer."
+)
+FULL_INSTRUCTIONS = INSTRUCTIONS_CLI.strip() or PRIMARY_INSTRUCTION
+
+def _ensure_primary_instruction(text: Optional[str]) -> str:
+    """
+    Guarantee the CLI-style preamble is present and on the first line.
+    Upstream still receives the full prompt, but client-facing instructions
+    must always include the one-line identity header.
+    """
+    if not text:
+        return PRIMARY_INSTRUCTION
+
+    stripped = text.strip()
+    if not stripped:
+        return PRIMARY_INSTRUCTION
+    if stripped.startswith(PRIMARY_INSTRUCTION):
+        return stripped
+    return f"{PRIMARY_INSTRUCTION}\n\n{stripped}"
 
 class CodexProxy(BaseProxyService):
     """Codex proxy service implementation."""
@@ -67,7 +91,9 @@ class CodexProxy(BaseProxyService):
         super().__init__(
             service_name='codex',
             port=3211,
-            config_manager=codex_config_manager
+            config_manager=codex_config_manager,
+            public_path_prefixes=['v1'],
+            require_public_prefix=True
         )
 
         # Allow the UI to connect via CORS
@@ -101,9 +127,102 @@ class CodexProxy(BaseProxyService):
     def build_target_param(self, path: str, request, body: bytes):  # type: ignore[override]
         target_url, headers, modified_body, active_config_name = super().build_target_param(path, request, body)
 
+        payload = None
+        if modified_body:
+            try:
+                payload = json.loads(modified_body.decode('utf-8'))
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+
+        client_instruction_override: Optional[str] = None
+
+        def _compose_responses_path(base_path: str) -> str:
+            base = (base_path or '').rstrip('/')
+            if base and not base.startswith('/'):
+                base = '/' + base
+            if not base:
+                return '/v1/responses'
+            if base.endswith('/v1/responses'):
+                return base
+            if base.endswith('/v1'):
+                return f"{base}/responses"
+            return f"{base}/v1/responses"
+
         try:
             normalized_path = path.lstrip('/').lower()
-            if normalized_path.endswith('responses'):
+            is_chat_completion_payload = (
+                isinstance(payload, dict) and isinstance(payload.get('messages'), list)
+            )
+
+            configs_snapshot = self.config_manager.configs
+            config_data = configs_snapshot.get(active_config_name or '', {})
+            base_url = (config_data.get('base_url') or '').rstrip('/')
+            base_path = urlsplit(base_url).path if base_url else ''
+
+            if is_chat_completion_payload and request.method.upper() == 'POST':
+                instructions_value = payload.get('instructions')
+                combined_instruction = _ensure_primary_instruction(instructions_value if isinstance(instructions_value, str) else None)
+                client_instruction_override = combined_instruction
+                payload['instructions'] = FULL_INSTRUCTIONS
+
+                messages_payload = payload.get('messages') or []
+                normalized_messages = []
+                for message in messages_payload:
+                    if not isinstance(message, dict):
+                        continue
+                    role = message.get('role', 'user')
+                    content_block = message.get('content')
+                    normalized_content = []
+                    if isinstance(content_block, str):
+                        normalized_content.append({
+                            'type': 'input_text',
+                            'text': content_block
+                        })
+                    elif isinstance(content_block, list):
+                        for item in content_block:
+                            if isinstance(item, dict):
+                                text_value = item.get('text')
+                                if isinstance(text_value, str):
+                                    normalized_content.append({
+                                        'type': 'input_text',
+                                        'text': text_value
+                                    })
+                            elif isinstance(item, str):
+                                normalized_content.append({
+                                    'type': 'input_text',
+                                    'text': item
+                                })
+                    elif content_block is not None:
+                        normalized_content.append({
+                            'type': 'input_text',
+                            'text': str(content_block)
+                        })
+                    normalized_messages.append({
+                        'role': role,
+                        'content': normalized_content or [{
+                            'type': 'input_text',
+                            'text': ''
+                        }]
+                    })
+
+                payload['input'] = normalized_messages
+                payload.pop('messages', None)
+                payload.setdefault('stream', True)
+                payload.setdefault('store', False)
+                path = 'responses'
+                normalized_path = 'responses'
+                parsed_url = urlsplit(target_url)
+                ensured_path = _compose_responses_path(base_path or parsed_url.path)
+                parsed_url = parsed_url._replace(path=ensured_path)
+                target_url = urlunsplit(parsed_url)
+                modified_body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+
+            if normalized_path.endswith('responses') or (
+                request.method.upper() == 'POST'
+                and not normalized_path
+                and isinstance(payload, dict)
+                and payload.get('input') is not None
+            ):
                 # Force mandatory Responses headers
                 headers['openai-beta'] = 'responses=experimental'
                 headers['accept'] = 'text/event-stream'
@@ -114,16 +233,16 @@ class CodexProxy(BaseProxyService):
                 # If the upstream base_url lacks /v1 while the client calls /responses,
                 # rewrite the path to /v1/responses (e.g. https://.../responses -> .../v1/responses)
                 try:
-                    if target_url.endswith('/responses') and '/v1/responses' not in target_url:
-                        target_url = target_url[:-len('/responses')] + '/v1/responses'
+                    parsed_target = urlsplit(target_url)
+                    ensured_path = _compose_responses_path(base_path or parsed_target.path)
+                    parsed_target = parsed_target._replace(path=ensured_path)
+                    target_url = urlunsplit(parsed_target)
                 except Exception:
                     pass
 
                 # Ensure required JSON fields exist: store=false, stream=true, instructions
-                import json
                 if modified_body:
                     try:
-                        payload = json.loads(modified_body.decode('utf-8'))
                         changed = False
                         if not isinstance(payload, dict):
                             payload = {}
@@ -164,49 +283,46 @@ class CodexProxy(BaseProxyService):
                                 changed = True
 
                         instructions_value = payload.get('instructions')
-                        instructions_text = instructions_value if isinstance(instructions_value, str) else ''
-                        host_header = headers.get('host', '')
-                        should_override_instructions = False
-                        if not instructions_text.strip():
-                            should_override_instructions = True
-                        elif 'gaccode.com' in host_header and not instructions_text.startswith('You are Codex'):
-                            should_override_instructions = True
+                        current_instruction = instructions_value if isinstance(instructions_value, str) else ''
+                        combined_instruction = _ensure_primary_instruction(current_instruction)
 
-                        if should_override_instructions:
-                            if instructions_text.strip():
-                                try:
-                                    request.state.codex_original_instructions = instructions_text
-                                except AttributeError:
-                                    pass
-                            payload['instructions'] = INSTRUCTIONS_CLI
+                        if client_instruction_override is None:
+                            client_instruction_override = combined_instruction
+                        else:
+                            client_instruction_override = _ensure_primary_instruction(client_instruction_override)
+
+                        if current_instruction.strip() != FULL_INSTRUCTIONS:
+                            payload['instructions'] = FULL_INSTRUCTIONS
                             changed = True
 
-                            if instructions_text.strip():
-                                messages = payload.get('input')
-                                if not isinstance(messages, list):
-                                    messages = []
-                                system_message = {
-                                    'role': 'system',
-                                    'content': [{
-                                        'type': 'input_text',
-                                        'text': instructions_text
-                                    }]
-                                }
-                                prepend = True
-                                if messages:
-                                    first = messages[0]
-                                    first_content = first.get('content')
-                                    if (
-                                        first.get('role') == 'system'
-                                        and isinstance(first_content, list)
-                                        and first_content
-                                        and first_content[0].get('text') == instructions_text
-                                    ):
-                                        prepend = False
-                                if prepend:
-                                    messages = [system_message] + messages
-                                    payload['input'] = messages
-                                    changed = True
+                        instructions_text = client_instruction_override
+
+                        if instructions_text.strip():
+                            messages = payload.get('input')
+                            if not isinstance(messages, list):
+                                messages = []
+                            system_message = {
+                                'role': 'system',
+                                'content': [{
+                                    'type': 'input_text',
+                                    'text': instructions_text
+                                }]
+                            }
+                            prepend = True
+                            if messages:
+                                first = messages[0]
+                                first_content = first.get('content')
+                                if (
+                                    first.get('role') == 'system'
+                                    and isinstance(first_content, list)
+                                    and first_content
+                                    and first_content[0].get('text') == instructions_text
+                                ):
+                                    prepend = False
+                            if prepend:
+                                messages = [system_message] + messages
+                                payload['input'] = messages
+                                changed = True
 
                         if payload.get('store') is None:
                             payload['store'] = False
@@ -296,6 +412,12 @@ class CodexProxy(BaseProxyService):
                         pass
         except Exception:
             pass
+
+        if client_instruction_override:
+            try:
+                request.state.codex_original_instructions = client_instruction_override
+            except AttributeError:
+                pass
 
         return target_url, headers, modified_body, active_config_name
 

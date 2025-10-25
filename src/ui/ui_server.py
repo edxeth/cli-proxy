@@ -88,8 +88,6 @@ def _normalize_service_name(service: str) -> Optional[str]:
     if not service:
         return None
     lower = service.lower()
-    if lower == 'a4f':
-        return 'legacy'
     if lower in SUPPORTED_SERVICES:
         return lower
     return None
@@ -512,20 +510,6 @@ def build_usage_snapshot() -> Dict[str, Any]:
     current_usage = aggregate_usage_from_logs(logs)
     history_usage = load_history_usage()
     combined_usage = combine_usage_maps(current_usage, history_usage)
-
-    def normalize_usage_services(usage_map: Dict[str, Dict[str, Dict[str, int]]]) -> Dict[str, Dict[str, Dict[str, int]]]:
-        normalized: Dict[str, Dict[str, Dict[str, int]]] = {}
-        for service, channels in usage_map.items():
-            normalized_service = 'legacy' if service == 'a4f' else service
-            bucket = normalized.setdefault(normalized_service, {})
-            for channel, metrics in channels.items():
-                existing = bucket.setdefault(channel, empty_metrics())
-                merge_usage_metrics(existing, metrics)
-        return normalized
-
-    current_usage = normalize_usage_services(current_usage)
-    history_usage = normalize_usage_services(history_usage)
-    combined_usage = normalize_usage_services(combined_usage)
 
     return {
         'logs': logs,

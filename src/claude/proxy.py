@@ -30,7 +30,9 @@ class ClaudeProxy(BaseProxyService):
         super().__init__(
             service_name='claude',
             port=3210,
-            config_manager=claude_config_manager
+            config_manager=claude_config_manager,
+            public_path_prefixes=['v1'],
+            require_public_prefix=True
         )
 
         # Allow the UI to connect through CORS
@@ -62,11 +64,51 @@ class ClaudeProxy(BaseProxyService):
         # Generate a stable metadata identifier so upstream sees a consistent session
         self._metadata_user_id = self._load_or_create_metadata_user_id()
 
+    @staticmethod
+    def _compose_messages_path(base_path: str) -> str:
+        base = (base_path or '').rstrip('/')
+        if base and not base.startswith('/'):
+            base = '/' + base
+        if not base:
+            return '/v1/messages'
+        if base.endswith('/v1/messages'):
+            return base
+        if base.endswith('/v1'):
+            return f"{base}/messages"
+        return f"{base}/v1/messages"
+
     def build_target_param(
         self, path: str, request: Request, body: bytes
     ) -> Tuple[str, Dict, bytes, Optional[str]]:
         """Extend base routing with Claude-specific defaults."""
-        target_url, headers, modified_body, active_config_name = super().build_target_param(path, request, body)
+        original_path = path
+        normalized_request_path = (original_path or '').strip('/').lower()
+        force_messages_endpoint = request.method.upper() == 'POST' and normalized_request_path in ('', 'chat/completions')
+
+        target_url, headers, modified_body, active_config_name = super().build_target_param(original_path, request, body)
+
+        configs_snapshot = self.config_manager.configs
+        config_data = configs_snapshot.get(active_config_name or '', {})
+        base_url = (config_data.get('base_url') or '').rstrip('/')
+        base_path = urlsplit(base_url).path if base_url else ''
+
+        if force_messages_endpoint:
+            parsed_target = urlsplit(target_url)
+            ensured_path = self._compose_messages_path(base_path or parsed_target.path)
+            parsed_target = parsed_target._replace(path=ensured_path)
+            target_url = urlunsplit(parsed_target)
+            path = 'v1/messages'
+        else:
+            path = original_path
+
+        # Some upstreams (e.g. GACCode) now require the Claude API to be called via
+        # the canonical /v1/messages endpoint. Older clients may still POST to the root,
+        # so transparently upgrade those requests to keep compatibility.
+        if request.method.upper() == 'POST' and (not path or path in ('', '/')):
+            parsed_target = urlsplit(target_url)
+            ensured_path = self._compose_messages_path(base_path or parsed_target.path)
+            parsed_target = parsed_target._replace(path=ensured_path)
+            target_url = urlunsplit(parsed_target)
 
         parsed = urlsplit(target_url)
         query_items = parse_qsl(parsed.query, keep_blank_values=True)

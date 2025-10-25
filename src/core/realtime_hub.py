@@ -183,6 +183,22 @@ class RealTimeRequestHub:
         except Exception as e:
             self.logger.error(f"Failed to process response chunk: {e}")
 
+    async def request_warning(self, request_id: str, message: str, duration_ms: int):
+        """Broadcast a warning event for a long-running request."""
+        try:
+            if request_id in self.active_requests:
+                self.active_requests[request_id].duration_ms = duration_ms
+            await self.broadcast_event(
+                "warning",
+                request_id,
+                status="PENDING",
+                duration_ms=duration_ms,
+                warning=message,
+            )
+            self.logger.warning(f"Request warning: {request_id} - {message}")
+        except Exception as e:
+            self.logger.error(f"Failed to emit request warning: {e}")
+
     async def request_completed(self, request_id: str, status_code: int,
                               duration_ms: int, success: bool = True):
         """Mark a request as completed or failed and broadcast the result."""

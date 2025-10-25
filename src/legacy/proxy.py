@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 
 def _read_image_as_data_url(file_path: str) -> Optional[str]:
@@ -349,7 +350,9 @@ class LegacyProxy(BaseProxyService):
         super().__init__(
             service_name='legacy',
             port=3212,
-            config_manager=legacy_config_manager
+            config_manager=legacy_config_manager,
+            public_path_prefixes=['v1'],
+            require_public_prefix=True
         )
 
         self.app.add_middleware(
@@ -386,6 +389,19 @@ class LegacyProxy(BaseProxyService):
         """No built-in throttling; per-site limits control the pacing."""
         return None
 
+    @staticmethod
+    def _compose_chat_completions_path(base_path: str) -> str:
+        base = (base_path or '').rstrip('/')
+        if base and not base.startswith('/'):
+            base = '/' + base
+        if not base:
+            return '/v1/chat/completions'
+        if base.endswith('/v1/chat/completions'):
+            return base
+        if base.endswith('/v1'):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
     def build_target_param(
         self,
         path: str,
@@ -405,13 +421,18 @@ class LegacyProxy(BaseProxyService):
         config_data = configs.get(active_config_name, {})
         site_streaming = config_data.get('streaming')  # None (auto), True (force on), or False (force off)
         tool_calls_streaming = config_data.get('tool_calls_streaming')  # None (auto), True (allow), or False (disable)
+        base_url = (config_data.get('base_url') or '').rstrip('/')
+        base_path = urlsplit(base_url).path if base_url else ''
+        chat_completions_path = self._compose_chat_completions_path(base_path)
 
         normalized_path = path.lstrip('/').lower()
 
         # Map /responses payloads into chat completions for better compatibility
         if normalized_path == 'responses':
-            if target_url.endswith('/responses'):
-                target_url = target_url[:-len('/responses')] + '/v1/chat/completions'
+            parsed_target = urlsplit(target_url)
+            ensured_path = chat_completions_path if chat_completions_path else self._compose_chat_completions_path(parsed_target.path)
+            parsed_target = parsed_target._replace(path=ensured_path)
+            target_url = urlunsplit(parsed_target)
             request.state.legacy_responses = True
 
             try:
@@ -538,8 +559,11 @@ class LegacyProxy(BaseProxyService):
         
         # Ensure bare /chat/completions adds /v1 prefix
         if normalized_path == 'chat/completions' and '/v1/chat/completions' not in target_url:
-            if target_url.endswith('/chat/completions') and '/v1/' not in target_url:
-                target_url = target_url.replace('/chat/completions', '/v1/chat/completions')
+            if target_url.endswith('/chat/completions'):
+                parsed_target = urlsplit(target_url)
+                ensured_path = chat_completions_path if chat_completions_path else self._compose_chat_completions_path(parsed_target.path)
+                parsed_target = parsed_target._replace(path=ensured_path)
+                target_url = urlunsplit(parsed_target)
 
         return target_url, headers, modified_body, active_config_name
 

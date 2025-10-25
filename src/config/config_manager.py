@@ -20,11 +20,6 @@ class ConfigManager:
         """Ensure the config file exists; return True if newly created."""
         self._ensure_config_dir()
         if not self.config_file.exists():
-            if self.service_name == 'legacy':
-                legacy_alias = self.config_dir / 'a4f.json'
-                if legacy_alias.exists():
-                    legacy_alias.rename(self.config_file)
-                    return False
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
             return True

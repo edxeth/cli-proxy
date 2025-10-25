@@ -23,9 +23,11 @@ CLP is a local CLI proxy that manages and forwards API requests to AI providers 
 - Web UI (port 3300) with live request logs and usage stats
 - Streaming responses (SSE/NDJSON) passthrough
 - Built‑in request filters and usage extraction
+- Optional per-configuration RPM throttling to match upstream rate caps
 
 ### Monitoring
 - Live status and request/response logs
+- Service health via `/health` per proxy (used by the dashboard PID indicator)
 - Usage metrics by channel and service
 - Config health and switch history
 
@@ -53,7 +55,7 @@ src/
 ├── legacy/
 │   ├── configs.py              # Legacy proxy config
 │   ├── ctl.py                  # Legacy proxy controller
-│   └── proxy.py                # Legacy proxy (A4F, OpenAI-compatible)
+│   └── proxy.py                # Legacy proxy (OpenAI-compatible)
 ├── config/
 │   ├── config_manager.py       # JSON config manager (~/.clp/*.json)
 │   └── cached_config_manager.py
@@ -107,7 +109,7 @@ clp active codex dev
 {
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "-",
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3210",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3210/v1",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000",
     "MAX_THINKING_TOKENS": "30000",
@@ -117,6 +119,8 @@ clp active codex dev
 }
 ```
 2) Restart Claude Code after `clp start`.
+
+> **Endpoint note:** Claude clients must call `/v1/messages` (or `/v1/chat/completions`, which the proxy forwards to `/v1/messages`). Configure the base URL with the `/v1` suffix, for example `http://127.0.0.1:3210/v1`.
 
 ### What the Claude proxy adds for you
 - **Header normalisation:** requests are forwarded with the same header shape used by the official Claude Code CLI (e.g. `claude-cli/2.0.15` user agent, canonical `x-stainless-*` values, `Accept-Language: *`). This avoids “credential only authorised for Claude Code” errors on providers such as GACCode.
@@ -145,9 +149,11 @@ show_raw_agent_reasoning = true
 
 [model_providers.local]
 name = "local"
-base_url = "http://127.0.0.1:3211"
+base_url = "http://127.0.0.1:3211/v1"
 wire_api = "responses"
 ```
+
+> **Endpoint note:** Codex clients must call `/v1/responses` (or `/v1/chat/completions`, which the proxy rewrites upstream). Always include `/v1` at the end of the base URL you configure (e.g., `http://127.0.0.1:3211/v1`).
 
 ### Add an upstream Codex endpoint (GACCode) to the proxy
 Create or edit `~/.clp/codex.json` and add a config (you can manage these in the UI as well):
@@ -167,7 +173,7 @@ clp active codex gaccode
 ```
 
 ### GACCode specifics (what the proxy now handles for you)
-- Path rewrite: if the client calls `/responses` and your upstream `base_url` is `https://gaccode.com/codex`, the proxy forwards to `/v1/responses` automatically.
+- Path rewrite: if the client calls `/responses` and your upstream `base_url` is `https://gaccode.com/codex/v1`, the proxy keeps the request aligned with `/v1/responses` automatically.
 - Streaming + beta header: the proxy forces `Accept: text/event-stream` and `OpenAI-Beta: responses=experimental` so Responses streaming always works.
 - No compression for SSE: the proxy sets `Accept-Encoding: identity` to avoid `zstd/gzip` compressed event streams that some clients can’t decode.
 - Minimal valid body: if a client omits Responses fields, the proxy backfills `store=false`, `stream=true`, and a safe CLI-style `instructions` block.
@@ -189,7 +195,7 @@ curl -N \
         "model":"gpt-5",
         "input":[{"type":"message","role":"user","content":[{"type":"text","text":"hi"}]}]
       }' \
-  http://127.0.0.1:3211/responses
+  http://127.0.0.1:3211/v1/responses
 ```
 
 Using the built‑in probe (UI → Test Connection), or programmatically calling `CodexProxy.test_endpoint()`.
@@ -206,13 +212,13 @@ The proxy persists these choices in `~/.clp/data/system.json` and injects them a
 
 ## Legacy Proxy Service (port 3212)
 
-The Legacy proxy (`src/legacy/proxy.py`) is an OpenAI-compatible proxy that forwards requests to any OpenAI-compatible endpoint. It's designed for agents like Droid CLI and Roo Code that need OpenAI-style chat completion APIs.
+The Legacy proxy (`src/legacy/proxy.py`) is a minimal OpenAI-compatible proxy that forwards chat completion requests to any OpenAI-compatible endpoint. It's designed for AI coding agents like Droid CLI and Roo Code.
 
 ### Key Features
-- **Tool Calling Support**: Full streaming support for function calling with proper SSE transformation
-- **Request Normalization**: Converts between different API formats (Responses → OpenAI-compatible)
-- **RPM Rate Limiting**: Conservative per-minute rate limiting to avoid overwhelming upstream APIs (default: `None` for unlimited local requests, but respects upstream limits)
-- **SSE Streaming**: Transforms non-streaming responses to SSE format for clients that expect streaming
+- **Tool Calling Support**: Full support for OpenAI-style function calling with automatic SSE transformation
+- **SSE Streaming**: Transforms non-streaming JSON responses to SSE format for streaming clients
+- **RPM Rate Limiting**: Per-provider rate limiting to respect upstream API limits
+- **Clean & Minimal**: No unnecessary bloat - just core proxy functionality
 
 ### Starting the Legacy Proxy
 ```bash
@@ -223,7 +229,7 @@ uv run -p .venv clp start
 .venv/bin/python -m src.legacy.proxy
 ```
 
-The proxy listens on `http://127.0.0.1:3212`.
+The proxy listens on port `3212`; use `http://127.0.0.1:3212/v1` as the base URL for client requests.
 
 ### Configuration
 Create or edit `~/.clp/legacy.json`:
@@ -242,7 +248,7 @@ The legacy proxy fully supports tool calling for models that have the `function_
 
 **Request:**
 ```bash
-curl -X POST http://127.0.0.1:3212/chat/completions \
+curl -X POST http://127.0.0.1:3212/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -272,24 +278,24 @@ data: [DONE]
 ```
 
 **How it works:**
-1. Client sends `stream=true` + tools to the proxy
-2. Proxy detects tools and forces `stream=false` to upstream (many OpenAI-compatible APIs don't support streaming + tools simultaneously)
-3. Proxy transforms the non-streaming JSON response into SSE format for the client
-4. Tool calls are preserved in the SSE delta field, appearing as if they came from a streaming response
+1. Client sends `stream=true` with tools to the proxy
+2. Proxy forwards the request with `stream=false` to upstream (A4F and similar providers don't support streaming + tools)
+3. Upstream returns a complete JSON response with tool calls
+4. Proxy automatically transforms the JSON response into SSE chunks for the client
+5. Tool calls appear in SSE delta fields as if they came from a streaming response
 
 ### Known Issues
 See `docs/OPUS_DROID_ISSUE.md` for documented issues with specific model/client combinations.
 
 ### RPM Rate Limiting
-The legacy proxy has a conservative default RPM limit to avoid overwhelming upstream APIs:
-- **Default**: `None` (no limit on local requests)
-- **Per-upstream config**: Can be set via the `rpm_limit` field in `~/.clp/legacy.json`
-- **Behavior**: When limit is reached, requests queue with exponential backoff
+Each legacy configuration can declare an optional `rpm_limit`. When set to a positive number the proxy smooths request bursts so the upstream never returns a rate-limit error. Values `0` or `null` disable throttling entirely.
 
-If you hit rate limits, either:
-1. Increase the `rpm_limit` in config
-2. Contact the upstream provider (A4F) for higher limits
-3. Use multiple API keys with load balancing
+- **Where**: `~/.clp/legacy.json` (or via the UI) → set `"rpm_limit": 10` for 10 requests/minute.
+- **How**: Requests queue with a short safety margin (≈10 %) instead of hammering the upstream.
+- **Disable**: Remove the field or set it to `0` for unlimited RPM.
+
+### Legacy health endpoint
+Every proxy exposes `GET /health` with its PID and active configuration. The dashboard already consumes this endpoint, but you can also poll it from external monitors if you launch services manually.
 
 ## Factory/Droid BYOK (works with the proxy)
 
@@ -300,7 +306,7 @@ Example `~/.factory/config.json` entry pointing at the local proxy:
     {
       "model_display_name": "GPT-5",
       "model": "gpt-5",
-      "base_url": "http://127.0.0.1:3211",
+      "base_url": "http://127.0.0.1:3211/v1",
       "api_key": "sk-local-proxy-anything",
       "provider": "openai",
       "max_tokens": 400000,
@@ -314,13 +320,23 @@ Example `~/.factory/config.json` entry pointing at the local proxy:
 ```
 
 Notes:
-- Keep the upstream in `~/.clp/codex.json` as `https://gaccode.com/codex` (no `/v1`); Droid’s `/v1/responses` → proxy → `…/v1/responses` is handled automatically.
+- Set the upstream in `~/.clp/codex.json` to `https://gaccode.com/codex/v1` (include the `/v1` suffix); the proxy keeps downstream `/v1/responses` and `/v1/chat/completions` requests consistent with the upstream path.
 - If the client can’t add headers, the proxy now injects the Responses/SSE headers for you.
+
+## Legacy service configuration
+
+- Config file: `~/.clp/legacy.json`
+- Each entry needs `base_url`, `auth_token`, and optionally `api_key`, `weight`, `rpm_limit`, etc.
+- Set `"rpm_limit": 0` (or omit it) for unlimited throughput; use a positive value to let the proxy pace requests locally.
+- Health check: `curl http://127.0.0.1:3212/health` returns JSON with `status`, `pid`, and the active config, which keeps the dashboard in sync even when the service is launched manually.
 
 ## Troubleshooting
 
 - 401 Unauthorized
   - Most common cause: key in the wrong place. Put your real key under `auth_token` in `~/.clp/codex.json`. The proxy injects `Authorization: Bearer …` upstream. Your client can use any dummy key.
+
+- 400 Invalid request (e.g., `max_tokens_exceeded`)
+  - The legacy proxy now streams upstream validation errors immediately in SSE, so clients display the reason instead of timing out. Adjust the offending parameter (e.g., lower `max_tokens`) and retry.
 
 - 200 but no visible answer
   - Previously caused by compressed SSE (`content-encoding: zstd`) or missing Responses headers; the proxy now forces identity encoding and adds headers. If a UI still doesn’t render, use the helper below to confirm streaming works.

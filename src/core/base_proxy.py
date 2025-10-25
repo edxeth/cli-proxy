@@ -2,14 +2,16 @@
 """Base proxy service implementation shared by the Claude and Codex proxies."""
 import asyncio
 import base64
+import contextlib
 import json
+import os
 import subprocess
 import sys
 import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Iterable
 from urllib.parse import urlsplit
 
 import httpx
@@ -29,7 +31,14 @@ from .rate_limiter import RequestRateLimiter
 class BaseProxyService(ABC):
     """Base proxy service implementation."""
     
-    def __init__(self, service_name: str, port: int, config_manager):
+    def __init__(
+        self,
+        service_name: str,
+        port: int,
+        config_manager,
+        public_path_prefixes: Optional[Iterable[str]] = None,
+        require_public_prefix: bool = False,
+    ):
         """
         Initialise the proxy service.
 
@@ -41,6 +50,11 @@ class BaseProxyService(ABC):
         self.service_name = service_name
         self.port = port
         self.config_manager = config_manager
+        self.public_path_prefixes = [
+            prefix.strip('/').lower()
+            for prefix in (public_path_prefixes or [])
+            if isinstance(prefix, str) and prefix.strip('/')]
+        self.require_public_prefix = require_public_prefix and bool(self.public_path_prefixes)
 
         # Initialise runtime paths
         self.config_dir = Path.home() / '.clp/run'
@@ -82,6 +96,11 @@ class BaseProxyService(ABC):
         # Shared request rate limiter
         self._rate_limiter = RequestRateLimiter()
 
+        # Upstream monitoring configuration (seconds)
+        self.upstream_warn_after = float(os.environ.get('CLP_UPSTREAM_WARN_AFTER', 45))
+        self.upstream_warning_interval = float(os.environ.get('CLP_UPSTREAM_WARNING_INTERVAL', 30))
+
+
         # FastAPI application wiring
         self.app = FastAPI()
         self._setup_routes()
@@ -99,11 +118,14 @@ class BaseProxyService(ABC):
     
     def _create_async_client(self) -> httpx.AsyncClient:
         """Create and configure an httpx AsyncClient."""
-        timeout = httpx.Timeout(  # Allow long-running streaming responses
-            timeout=None,
-            connect=30.0,
-            read=None,
-            write=30.0,
+        # FIX: Extended read timeout to allow long AI thinking periods (extended thinking, etc.)
+        # Combined with SSE heartbeats to keep connections alive during extended thinking
+        # Heartbeats prevent intermediate proxy/client timeouts while we wait for model output
+        timeout = httpx.Timeout(
+            timeout=120.0,   # Overall 2-minute timeout
+            connect=30.0,    # 30s connect timeout
+            read=600.0,      # 10-minute read timeout - allows extended thinking periods
+            write=30.0,      # 30s write timeout
             pool=None,
         )
         limits = httpx.Limits(
@@ -118,6 +140,30 @@ class BaseProxyService(ABC):
 
     def _setup_routes(self):
         """Register the FastAPI routes."""
+        @self.app.get("/health")
+        async def health_route():
+            return {
+                "status": "ok",
+                "service": self.service_name,
+                "port": self.port,
+                "pid": os.getpid(),
+                "active_config": self.config_manager.active_config,
+            }
+
+        if self.public_path_prefixes:
+            for prefix in self.public_path_prefixes:
+                path_prefix = prefix.strip('/')
+                if path_prefix:
+                    @self.app.get(f"/{path_prefix}/health")
+                    async def prefixed_health(path_prefix=path_prefix):
+                        return {
+                            "status": "ok",
+                            "service": self.service_name,
+                            "port": self.port,
+                            "pid": os.getpid(),
+                            "active_config": self.config_manager.active_config,
+                        }
+
         @self.app.api_route(
             "/{path:path}",
             methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']
@@ -668,14 +714,32 @@ class BaseProxyService(ABC):
         headers = {k: v for k, v in request.headers.items() if k.lower() not in excluded_headers}
         headers['host'] = urlsplit(target_url).netloc
         headers.setdefault('connection', 'keep-alive')
+
+        def _extract_token(value: Optional[str]) -> Optional[str]:
+            if not value:
+                return None
+            stripped = value.strip()
+            if not stripped:
+                return None
+            if stripped.lower().startswith('bearer '):
+                return stripped[7:].strip()
+            return stripped
+
+        bearer_token = None
+        if incoming_auth:
+            headers['authorization'] = incoming_auth
+            bearer_token = _extract_token(incoming_auth)
+        elif config_data.get('auth_token'):
+            bearer_token = _extract_token(config_data['auth_token'])
+            if bearer_token:
+                headers['authorization'] = f'Bearer {bearer_token}'
+
         if incoming_api_key:
             headers['x-api-key'] = incoming_api_key
         elif config_data.get('api_key'):
             headers['x-api-key'] = config_data['api_key']
-        if incoming_auth:
-            headers['authorization'] = incoming_auth
-        elif config_data.get('auth_token'):
-            headers['authorization'] = f'Bearer {config_data["auth_token"]}'
+        elif bearer_token:
+            headers['x-api-key'] = bearer_token
 
         return target_url, headers, modified_body, active_config_name
 
@@ -698,8 +762,12 @@ class BaseProxyService(ABC):
             return None
         return rpm_value
 
-    async def _apply_rate_limit(self, config_name: Optional[str]) -> None:
-        """Apply request throttling before forwarding upstream."""
+    async def _apply_rate_limit(self, config_name: Optional[str]) -> Tuple[float, Optional[float]]:
+        """Apply request throttling before forwarding upstream.
+
+        Returns:
+            Tuple[float, Optional[float]]: (wait_time_seconds, rpm_limit)
+        """
         if not config_name:
             key = self.service_name
             config_data = {}
@@ -710,9 +778,87 @@ class BaseProxyService(ABC):
 
         rpm_limit = self._resolve_rpm_limit(config_data)
         if rpm_limit is None:
+            return 0.0, None
+
+        wait_time = await self._rate_limiter.acquire(key, rpm_limit)
+
+        # FIX: Add minimum inter-request delay to prevent burst RPS violations
+        # Even if RPM allows it, enforce minimum delay between requests
+        min_burst_delay = float(os.getenv('CLP_MIN_REQUEST_DELAY', '0.5'))
+        if min_burst_delay > 0:
+            last_request_time = self._rate_limiter.get_last_request_time(key)
+            if last_request_time is not None:
+                time_since_last = time.time() - last_request_time
+                if time_since_last < min_burst_delay:
+                    burst_wait = min_burst_delay - time_since_last
+                    logger = getattr(self, 'logger', None)
+                    if logger:
+                        logger.debug(f"[{config_name}] Burst protection: waiting {burst_wait:.2f}s (last request {time_since_last:.2f}s ago)")
+                    await asyncio.sleep(burst_wait)
+                    wait_time += burst_wait
+
+        # Log rate limit details for debugging
+        if wait_time > 0:
+            logger = getattr(self, 'logger', None)
+            if logger:
+                last_request_time = self._rate_limiter.get_last_request_time(key)
+                time_since_last = time.time() - last_request_time if last_request_time else 0
+                logger.info(f"[{config_name}] Rate limit wait: {wait_time:.2f}s (RPM: {rpm_limit}, last request: {time_since_last:.2f}s ago)")
+
+        return wait_time, rpm_limit
+
+    async def _monitor_upstream_stall(
+        self,
+        request_id: str,
+        activity_event: asyncio.Event,
+        done_event: asyncio.Event,
+        dispatch_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Emit warnings when an upstream response is idle for too long."""
+
+        warn_after = self.upstream_warn_after if self.upstream_warn_after > 0 else None
+        warn_interval = self.upstream_warning_interval if self.upstream_warning_interval > 0 else None
+
+        if warn_after is None:
             return
 
-        await self._rate_limiter.acquire(key, rpm_limit)
+        logger = getattr(self, 'logger', None)
+        model_name = dispatch_meta.get('model') if isinstance(dispatch_meta, dict) else 'unknown'
+
+        inactivity_threshold = warn_after
+        start_time = time.monotonic()
+        last_reset = start_time
+        warning_count = 0
+
+        while not done_event.is_set():
+            try:
+                await asyncio.wait_for(activity_event.wait(), timeout=inactivity_threshold)
+                activity_event.clear()
+                last_reset = time.monotonic()
+                warning_count = 0
+                inactivity_threshold = warn_after
+            except asyncio.TimeoutError:
+                now = time.monotonic()
+                elapsed_since_last = now - last_reset
+                elapsed_total = now - start_time
+                message = (
+                    f"Upstream response pending for {model_name}; no activity for {elapsed_since_last:.1f}s"
+                )
+
+                if logger:
+                    logger.warning("Upstream warning (%s): %s", request_id, message)
+
+                await self.realtime_hub.request_warning(
+                    request_id=request_id,
+                    message=message,
+                    duration_ms=int(elapsed_total * 1000),
+                )
+
+                warning_count += 1
+                if warn_interval is None or warn_interval <= 0:
+                    inactivity_threshold = warn_after
+                else:
+                    inactivity_threshold = warn_interval
 
     @abstractmethod
     def test_endpoint(self, model: str, base_url: str, auth_token: str = None, api_key: str = None, extra_params: dict = None) -> dict:
@@ -757,13 +903,34 @@ class BaseProxyService(ABC):
         original_headers = {k: v for k, v in request.headers.items()}
         original_body = await request.body()
 
+        effective_path = path.strip('/')
+        effective_lower = effective_path.lower()
+        exempt_paths = {'health', 'ws/realtime'}
+        prefix_matched = (not self.public_path_prefixes) or (effective_lower in exempt_paths)
+        if self.public_path_prefixes:
+            lowered = effective_lower
+            if lowered not in exempt_paths:
+                for prefix in self.public_path_prefixes:
+                    if lowered == prefix:
+                        effective_path = ''
+                        prefix_matched = True
+                        break
+                    prefix_with_sep = f"{prefix}/"
+                    if lowered.startswith(prefix_with_sep):
+                        effective_path = effective_path[len(prefix_with_sep):]
+                        prefix_matched = True
+                        break
+
+        if self.require_public_prefix and not prefix_matched:
+            return JSONResponse({"error": "Not Found"}, status_code=404)
+
         active_config_name: Optional[str] = None
         target_headers: Optional[Dict[str, str]] = None
         filtered_body: Optional[bytes] = None
         target_url: Optional[str] = None
 
         try:
-            target_url, target_headers, target_body, active_config_name = self.build_target_param(path, request, original_body)
+            target_url, target_headers, target_body, active_config_name = self.build_target_param(effective_path, request, original_body)
 
             # Notify listeners that the request has started
             await self.realtime_hub.request_started(
@@ -779,7 +946,26 @@ class BaseProxyService(ABC):
             return JSONResponse({"error": str(exc)}, status_code=500)
 
         # Enforce configured rate limits before further processing
-        await self._apply_rate_limit(active_config_name)
+        wait_time, rpm_limit = await self._apply_rate_limit(active_config_name)
+
+        dispatch_meta = getattr(request.state, 'dispatch_meta', None)
+        logger = getattr(self, 'logger', None)
+        if isinstance(dispatch_meta, dict) and logger:
+            model_name = dispatch_meta.get('model')
+            stream_flag = dispatch_meta.get('stream')
+            has_tools = dispatch_meta.get('has_tools')
+            message_count = dispatch_meta.get('messages')
+            wait_display = f"{wait_time:.2f}s" if wait_time and wait_time > 0 else "0.00s"
+            rpm_display = f"{rpm_limit:.2f}" if rpm_limit is not None else "∞"
+            logger.info(
+                "Dispatching upstream - model: %s, stream: %s, has_tools: %s, messages: %s, waited: %s, rpm_limit: %s",
+                model_name,
+                stream_flag,
+                has_tools,
+                message_count,
+                wait_display,
+                rpm_display,
+            )
 
         # Apply request filters off the event loop
         filtered_body = await asyncio.to_thread(self.apply_request_filter, target_body)
@@ -804,10 +990,17 @@ class BaseProxyService(ABC):
                 headers=target_headers,
                 content=filtered_body if filtered_body else None,
             )
+
+            if logger:
+                logger.debug(f"Sending request {request_id} to upstream, stream={is_stream}")
+
             response = await self.client.send(request_out, stream=is_stream)
 
             status_code = response.status_code
             upstream_status_code = status_code
+
+            if logger:
+                logger.debug(f"Upstream responded with status {status_code} for request {request_id}")
             chunk_transformer = self.get_response_chunk_transformer(
                 request=request,
                 path=path,
@@ -870,22 +1063,62 @@ class BaseProxyService(ABC):
             response_truncated = False
             first_chunk = True
 
+            activity_event = asyncio.Event()
+            done_event = asyncio.Event()
+            stall_monitor = asyncio.create_task(
+                self._monitor_upstream_stall(
+                    request_id=request_id,
+                    activity_event=activity_event,
+                    done_event=done_event,
+                    dispatch_meta=dispatch_meta,
+                )
+            )
+
             async def iterator():
-                nonlocal response_truncated, total_response_bytes, first_chunk, lb_result_recorded
+                nonlocal response_truncated, total_response_bytes, first_chunk, lb_result_recorded, status_code
+                logger = getattr(self, 'logger', None)
+                chunk_count = 0
+                timeout_occurred = False
+
+                # SSE heartbeat configuration
+                heartbeat_enabled = os.getenv('CLP_SSE_HEARTBEAT_ENABLED', 'true').lower() == 'true'
+                heartbeat_interval = float(os.getenv('CLP_SSE_HEARTBEAT_INTERVAL', '15'))
+                last_activity_time = time.monotonic()
+
                 try:
+                    if logger:
+                        logger.debug(f"Starting to iterate response stream for request {request_id}")
+
                     async for chunk in response.aiter_bytes():
+                        # Emit SSE heartbeat if idle too long
+                        if heartbeat_enabled and chunk_count > 0:
+                            idle_time = time.monotonic() - last_activity_time
+                            if idle_time >= heartbeat_interval:
+                                if logger:
+                                    logger.debug(f"[{request_id}] Emitting SSE heartbeat after {idle_time:.1f}s idle")
+                                yield b': keepalive\n\n'
+                                last_activity_time = time.monotonic()
+
+                        chunk_count += 1
+
                         if not chunk:
+                            activity_event.set()
                             continue
 
                         if chunk_transformer:
                             chunk = chunk_transformer.process(chunk)
                             if not chunk:
+                                activity_event.set()
                                 continue
+
+                        last_activity_time = time.monotonic()
 
                         current_duration = int((time.time() - start_time) * 1000)
 
                         # Mark the request as streaming on the first chunk
                         if first_chunk:
+                            if logger:
+                                logger.info(f"First chunk received after {current_duration}ms for request {request_id}")
                             await self.realtime_hub.request_streaming(request_id, current_duration)
                             first_chunk = False
 
@@ -907,6 +1140,8 @@ class BaseProxyService(ABC):
                                 response_truncated = True
                         else:
                             response_truncated = True
+
+                        activity_event.set()
                         yield chunk
 
                     if chunk_transformer:
@@ -932,9 +1167,65 @@ class BaseProxyService(ABC):
                                     response_truncated = True
                             else:
                                 response_truncated = True
+                            activity_event.set()
                             yield trailing_chunk
+
+                except httpx.ReadTimeout as exc:
+                    # Upstream API timed out while streaming response
+                    timeout_occurred = True
+                    current_duration = int((time.time() - start_time) * 1000)
+
+                    if logger:
+                        logger.error(
+                            f"Read timeout after {current_duration}ms waiting for upstream response "
+                            f"(request {request_id}, {chunk_count} chunks received)"
+                        )
+
+                    # Emit an SSE error event so the client knows what happened
+                    # This allows Droid to show a meaningful error instead of hanging forever
+                    error_event = (
+                        'data: {"type":"error","error":{"message":"Upstream API timed out after 90s",'
+                        f'"code":"read_timeout","duration_ms":{current_duration}}}}}\n\n'
+                    ).encode('utf-8')
+                    yield error_event
+
+                    # Update status for logging
+                    status_code = 504  # Gateway Timeout
+
+                except Exception as exc:
+                    # Catch any other unexpected errors during streaming
+                    current_duration = int((time.time() - start_time) * 1000)
+
+                    if logger:
+                        logger.error(
+                            f"Unexpected error during response streaming after {current_duration}ms "
+                            f"(request {request_id}): {type(exc).__name__}: {exc}"
+                        )
+
+                    # Emit an SSE error event
+                    error_event = (
+                        f'data: {{"type":"error","error":{{"message":"{str(exc)}",'
+                        f'"code":"stream_error","duration_ms":{current_duration}}}}}\n\n'
+                    ).encode('utf-8')
+                    yield error_event
+
+                    status_code = 500
+
                 finally:
+                    done_event.set()
+                    activity_event.set()
+                    stall_monitor.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await stall_monitor
                     final_duration = int((time.time() - start_time) * 1000)
+
+                    if logger:
+                        if timeout_occurred:
+                            logger.error(f"Stream terminated due to read timeout after {final_duration}ms for request {request_id} ({chunk_count} chunks received)")
+                        elif chunk_count == 0:
+                            logger.warning(f"Stream completed with ZERO chunks after {final_duration}ms for request {request_id} - upstream may have timed out")
+                        else:
+                            logger.debug(f"Stream completed with {chunk_count} chunks, {total_response_bytes} bytes after {final_duration}ms for request {request_id}")
 
                     # Signal that the request finished
                     await self.realtime_hub.request_completed(
